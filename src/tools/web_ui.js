@@ -293,10 +293,10 @@ export const webUiTools = {
 
                 res.write(`data: ${JSON.stringify({ type: 'agent_start', agent: agent.name || agent.id, agentId: agent.id })}\n\n`);
 
-                let userMessage = `${channelContext}\n\n---\n\nUSER MESSAGE IN CHANNEL:\n${messageBody}`;
+                let userMessage = messageBody;
                 if (images?.length > 0) {
                     userMessage = [
-                        { type: 'text', text: userMessage },
+                        { type: 'text', text: messageBody },
                         ...images.map((img) => ({ type: 'image_url', image_url: { url: img } })),
                     ];
                 }
@@ -313,7 +313,10 @@ export const webUiTools = {
                 };
 
                 try {
-                    await agent.chat(userMessage, confirmCallback, onUpdate);
+                    await agent.chat(userMessage, confirmCallback, onUpdate, {
+                        channelContext,
+                        replyTo: replyTo || null,
+                    });
                     await appendChannelMessage(channelId, {
                         role: 'assistant',
                         author: agent.name || agent.id,

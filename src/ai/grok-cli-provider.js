@@ -9,6 +9,8 @@ import {
     countUserTurns,
     extractStreamTextDelta,
     responsesToChatCompletions,
+    cleanAssistantText,
+    emitContentAsStream,
 } from './grok-cli-proxy.js';
 
 export class GrokCliProvider {
@@ -32,12 +34,16 @@ export class GrokCliProvider {
             throw new Error('Grok CLI not authenticated. Run `grok login` on this machine.');
         }
 
+        const hasTools = Boolean(tools?.length);
+        // Tool calls require a complete Responses payload — streaming drops function_call events.
+        const useStream = Boolean(onUpdate && !hasTools);
+
         const body = chatCompletionsToResponses(
             {
                 model: this.model,
                 messages,
-                stream: Boolean(onUpdate),
-                tools: tools?.length ? tools : undefined,
+                stream: useStream,
+                tools: hasTools ? tools : undefined,
             },
             { defaultModel: this.model },
         );
@@ -47,7 +53,7 @@ export class GrokCliProvider {
             requestId: crypto.randomUUID(),
             turnIdx: countUserTurns(body.input),
             model: body.model,
-            stream: Boolean(onUpdate),
+            stream: useStream,
         });
 
         let response = await fetch(`${this.baseUrl}/responses`, {
@@ -66,7 +72,7 @@ export class GrokCliProvider {
                 requestId: crypto.randomUUID(),
                 turnIdx: countUserTurns(body.input),
                 model: body.model,
-                stream: Boolean(onUpdate),
+                stream: useStream,
             });
             response = await fetch(`${this.baseUrl}/responses`, {
                 method: 'POST',
@@ -80,17 +86,21 @@ export class GrokCliProvider {
             throw new Error(`Grok CLI API Error (${response.status}): ${errText.slice(0, 400)}`);
         }
 
-        if (onUpdate) {
+        if (useStream) {
             return this._handleStream(response, onUpdate, body.model);
         }
 
         const payload = await response.json();
         const completion = responsesToChatCompletions(payload, { model: body.model });
         const choice = completion.choices[0];
-        return {
-            content: choice.message.content,
-            toolCalls: choice.message.tool_calls || null,
-        };
+        const content = choice.message.content;
+        const toolCalls = choice.message.tool_calls || null;
+
+        if (onUpdate && content) {
+            emitContentAsStream(content, onUpdate);
+        }
+
+        return { content, toolCalls };
     }
 
     async _handleStream(response, onUpdate, model) {
@@ -99,7 +109,7 @@ export class GrokCliProvider {
             const payload = await response.json();
             const completion = responsesToChatCompletions(payload, { model });
             const text = completion.choices[0]?.message?.content || '';
-            if (text) onUpdate({ type: 'token', content: text });
+            if (text) emitContentAsStream(text, onUpdate);
             return {
                 content: text || null,
                 toolCalls: completion.choices[0]?.message?.tool_calls || null,
@@ -138,6 +148,6 @@ export class GrokCliProvider {
             }
         }
 
-        return { content: fullContent || null, toolCalls: null };
+        return { content: cleanAssistantText(fullContent) || null, toolCalls: null };
     }
 }

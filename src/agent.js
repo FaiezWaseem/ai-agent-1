@@ -16,6 +16,7 @@ export class Agent {
   constructor(config = {}) {
     this.provider = null;
     this.memory = []; // Store chat history
+    this._ephemeralContextPrefix = null;
     
     // Config properties
     this.cwd = process.cwd();
@@ -184,7 +185,13 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
   }
 
   async chat(userMessage, confirmCallback = null, onUpdate = null, options = {}) {
-    const entry = { role: 'user', content: userMessage };
+    // Channel chats inject workspace context per request — don't bloat agent memory with it.
+    const memoryContent = options.channelContext
+      ? (typeof userMessage === 'string' ? userMessage : userMessage)
+      : userMessage;
+    this._ephemeralContextPrefix = options.channelContext || null;
+
+    const entry = { role: 'user', content: memoryContent };
     if (options.replyTo) entry.replyTo = options.replyTo;
     if (options.messageId) entry.id = options.messageId;
     this.memory.push(entry);
@@ -209,43 +216,15 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
         
         // Fallback: Check for JSON tool calls in content if native toolCalls are empty
         if ((!response.toolCalls || response.toolCalls.length === 0) && response.content) {
-            // Regex to find JSON blocks (supports json, python, or no language tag)
-            // Modified to be more lenient: optional code blocks
-            const jsonMatch = response.content.match(/```(?:json|python|js)?\s*(\{[\s\S]*?\})\s*```/) || 
-                              response.content.match(/^\s*(\{[\s\S]*?\})\s*$/); // Match raw JSON if it's the only thing (or main thing)
-            
-            if (jsonMatch) {
-                try {
-                    const parsed = JSON.parse(jsonMatch[1]);
-                    // Support various formats the model might hallucinate
-                    const toolName = parsed.tool || parsed.cmd_type || parsed.function || parsed.name;
-                    
-                    if (toolName && this.tools[toolName]) {
-                         // It's a valid tool call!
-                         // If args are nested (like in my instruction), use them. 
-                         // If flat (like the user's error log), use the whole object.
-                         const args = parsed.args || parsed.arguments || parsed.parameters || parsed; 
-                         
-                         const fakeToolCall = {
-                             id: 'fallback-' + Date.now(),
-                             function: {
-                                 name: toolName,
-                                 arguments: JSON.stringify(args)
-                             }
-                         };
-                         
-                         // Initialize toolCalls array
-                         response.toolCalls = [fakeToolCall];
-                         
-                         // Optional: Clean up the content so we don't show the raw JSON to user twice
-                         // But for now, keeping it might be useful for debugging. 
-                         // Let's append a note.
-                         console.log(chalk.yellow(`(Detected JSON tool call in text: ${toolName})`));
-                    }
-                } catch (e) {
-                    // Ignore parse errors, it might just be code snippet
-                }
+            const inferred = this._inferToolCallsFromText(response.content);
+            if (inferred.length > 0) {
+                response.toolCalls = inferred;
+                console.log(chalk.yellow(`(Detected ${inferred.length} JSON tool call(s) in text)`));
             }
+        }
+
+        if (response.content) {
+            response.content = this._cleanAssistantContent(response.content);
         }
 
         // Handle Assistant Response
@@ -271,6 +250,7 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
         if (!response.toolCalls || response.toolCalls.length === 0) {
             await saveChatHistory(this.id, this.memory, this);
             if (onUpdate) onUpdate({ type: 'done' });
+            this._ephemeralContextPrefix = null;
             return finalResponse || response.content;
         }
 
@@ -311,6 +291,7 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
     }
     
     if (onUpdate) onUpdate({ type: 'done' });
+    this._ephemeralContextPrefix = null;
     return finalResponse;
   }
 
@@ -322,7 +303,8 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
         // Catch various context length errors from different providers
         if (message.includes('Input tokens exceed') || 
             message.includes('context_length_exceeded') || 
-            message.includes('maximum context length')) {
+            message.includes('maximum context length') ||
+            message.includes('maximum prompt length')) {
             
             console.log(chalk.yellow('⚠️  Token limit exceeded. Retrying with smaller context...'));
             
@@ -422,10 +404,31 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
         return msg;
     });
 
+    if (this._ephemeralContextPrefix) {
+        for (let idx = context.length - 1; idx >= 0; idx--) {
+            if (context[idx].role === 'user') {
+                const msg = context[idx];
+                if (typeof msg.content === 'string') {
+                    context[idx] = {
+                        ...msg,
+                        content: `${this._ephemeralContextPrefix}\n\n---\n\nUSER MESSAGE IN CHANNEL:\n${msg.content}`,
+                    };
+                } else if (Array.isArray(msg.content)) {
+                    const copy = [...msg.content];
+                    const textPart = copy.find((p) => p.type === 'text');
+                    const prefix = `${this._ephemeralContextPrefix}\n\n---\n\nUSER MESSAGE IN CHANNEL:\n`;
+                    if (textPart) textPart.text = prefix + (textPart.text || '');
+                    else copy.unshift({ type: 'text', text: prefix });
+                    context[idx] = { ...msg, content: copy };
+                }
+                break;
+            }
+        }
+    }
+
     if (truncateLargeOutputs) {
         // Create new objects to avoid mutating memory
         context = context.map(msg => {
-            // Truncate tool outputs and assistant messages that are too long
             if ((msg.role === 'tool' || msg.role === 'assistant') && msg.content && msg.content.length > 1000) {
                 return {
                     ...msg,
@@ -434,9 +437,96 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
             }
             return msg;
         });
+    } else {
+        context = context.map(msg => {
+            if (msg.role === 'tool' && typeof msg.content === 'string' && msg.content.length > 6000) {
+                return {
+                    ...msg,
+                    content: msg.content.substring(0, 6000) + '... [Tool output truncated]'
+                };
+            }
+            return msg;
+        });
     }
     
     return context;
+  }
+
+  _cleanAssistantContent(text) {
+    if (!text || typeof text !== 'string') return text;
+    let cleaned = text;
+    cleaned = cleaned.replace(/^(The user message is:[^\n]*\n?)+/gim, '');
+    cleaned = cleaned.replace(/^(First, the user message is[^\n]*\n?)+/gim, '');
+    cleaned = cleaned.replace(/^(I'm (?:the|acting as)[^\n]*\n?)+/gim, '');
+    cleaned = cleaned.replace(/^(My goal:[^\n]*\n?)+/gim, '');
+    cleaned = cleaned.replace(/\{[^{}]*\}/g, (match) => {
+      try {
+        const parsed = JSON.parse(match);
+        if (parsed && typeof parsed === 'object' && !parsed.tool && !parsed.name) {
+          const keys = Object.keys(parsed);
+          if (keys.length <= 3 && (keys.includes('path') || keys.includes('query') || keys.includes('category'))) {
+            return '';
+          }
+        }
+      } catch {}
+      return match;
+    });
+    return cleaned.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  _inferToolCallsFromText(content) {
+    const calls = [];
+    const seen = new Set();
+    const patterns = [
+      /```(?:json|python|js)?\s*(\{[\s\S]*?\})\s*```/g,
+      /(\{[^{}]*\})/g,
+    ];
+
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(content)) !== null) {
+        try {
+          const parsed = JSON.parse(match[1]);
+          const explicitName = parsed.tool || parsed.cmd_type || parsed.function;
+          if (explicitName && this.tools[explicitName]) {
+            const args = parsed.args || parsed.arguments || parsed.parameters || parsed;
+            const key = `${explicitName}:${JSON.stringify(args)}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              calls.push({
+                id: `fallback-${Date.now()}-${calls.length}`,
+                function: { name: explicitName, arguments: JSON.stringify(args) },
+              });
+            }
+            continue;
+          }
+
+          for (const def of this.toolsDefinition) {
+            const props = def.parameters?.properties || {};
+            const required = def.parameters?.required || [];
+            const keys = Object.keys(parsed).filter((k) => !['tool', 'name', 'args'].includes(k));
+            if (!keys.length) continue;
+            const matchesRequired = required.every((k) => k in parsed);
+            const matchesProps = keys.every((k) => k in props);
+            if (matchesRequired && matchesProps && this.tools[def.name]) {
+              const key = `${def.name}:${JSON.stringify(parsed)}`;
+              if (!seen.has(key)) {
+                seen.add(key);
+                calls.push({
+                  id: `fallback-${Date.now()}-${calls.length}`,
+                  function: { name: def.name, arguments: JSON.stringify(parsed) },
+                });
+              }
+              break;
+            }
+          }
+        } catch {
+          // not JSON
+        }
+      }
+    }
+
+    return calls;
   }
 
   async _maybeSummarizeHistory() {

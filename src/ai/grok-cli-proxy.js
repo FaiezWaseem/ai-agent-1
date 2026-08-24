@@ -16,10 +16,16 @@ function stringifyContent(content) {
     return JSON.stringify(content);
 }
 
+export const MAX_INPUT_CONTENT_CHARS = 12000;
+export const MAX_TOOL_OUTPUT_CHARS = 6000;
+
+export function truncateText(text, max = MAX_INPUT_CONTENT_CHARS) {
+    if (!text || text.length <= max) return text;
+    return `${text.slice(0, max)}\n...[truncated ${text.length - max} chars]`;
+}
+
 /**
  * Responses API tools use flat shape: { type, name, description, parameters }.
- * Chat Completions uses nested { type, function: { name, ... } }.
- * Agent tools are plain { name, description, parameters }.
  */
 export function normalizeToolsForResponses(tools) {
     if (!Array.isArray(tools) || tools.length === 0) return undefined;
@@ -29,30 +35,68 @@ export function normalizeToolsForResponses(tools) {
         const name = fn.name || tool.name;
         if (!name) return null;
 
-        const normalized = {
+        return {
             type: 'function',
             name,
             description: fn.description || tool.description || '',
             parameters: fn.parameters || tool.parameters || { type: 'object', properties: {} },
         };
+    }).filter(Boolean);
+}
 
-        if (fn.strict != null || tool.strict != null) {
-            normalized.strict = Boolean(fn.strict ?? tool.strict);
+/**
+ * Convert agent memory messages → Responses API input (with truncation + tool shapes).
+ */
+export function messagesToResponsesInput(messages, { maxChars = MAX_INPUT_CONTENT_CHARS } = {}) {
+    const input = [];
+
+    for (const message of messages || []) {
+        if (!message) continue;
+
+        if (message.role === 'tool') {
+            input.push({
+                type: 'function_call_output',
+                call_id: message.tool_call_id || message.call_id || 'call_unknown',
+                output: truncateText(stringifyContent(message.content), MAX_TOOL_OUTPUT_CHARS),
+            });
+            continue;
         }
 
-        return normalized;
-    }).filter(Boolean);
+        if (message.role === 'assistant' && message.tool_calls?.length) {
+            const text = stringifyContent(message.content);
+            if (text.trim()) {
+                input.push({
+                    type: 'message',
+                    role: 'assistant',
+                    content: truncateText(text, maxChars),
+                });
+            }
+            for (const tc of message.tool_calls) {
+                input.push({
+                    type: 'function_call',
+                    call_id: tc.id,
+                    name: tc.function?.name || tc.name,
+                    arguments: tc.function?.arguments || tc.arguments || '{}',
+                });
+            }
+            continue;
+        }
+
+        const role = message.role === 'system' ? 'system' : message.role || 'user';
+        input.push({
+            type: 'message',
+            role,
+            content: truncateText(stringifyContent(message.content), maxChars),
+        });
+    }
+
+    return input;
 }
 
 export function chatCompletionsToResponses(body, { defaultModel = 'grok-build' } = {}) {
     const model = body?.model || defaultModel;
     const messages = Array.isArray(body?.messages) ? body.messages : [];
-
-    const input = messages.map((message) => ({
-        type: 'message',
-        role: message.role || 'user',
-        content: stringifyContent(message.content),
-    }));
+    const input = messagesToResponsesInput(messages);
 
     const next = {
         model,
@@ -67,11 +111,8 @@ export function chatCompletionsToResponses(body, { defaultModel = 'grok-build' }
     if (body?.tools) next.tools = normalizeToolsForResponses(body.tools);
     if (body?.tool_choice) next.tool_choice = body.tool_choice;
 
+    // Reasoning stays server-side; don't request encrypted blobs back into our context.
     next.reasoning = { summary: 'concise' };
-    if (/^grok-4\.5(?:$|-)/.test(String(model))) {
-        next.reasoning.effort = 'high';
-    }
-    next.include = ['reasoning.encrypted_content'];
 
     return next;
 }
@@ -95,8 +136,10 @@ export function extractResponsesText(payload) {
     const chunks = [];
     for (const item of payload.output || []) {
         if (!item || typeof item !== 'object') continue;
+        if (item.type === 'reasoning' || item.type === 'reasoning_summary') continue;
         if (item.type === 'message' || item.role === 'assistant') {
             for (const part of item.content || []) {
+                if (part?.type === 'reasoning' || part?.type === 'summary_text') continue;
                 if (typeof part?.text === 'string') chunks.push(part.text);
                 else if (typeof part === 'string') chunks.push(part);
             }
@@ -129,8 +172,23 @@ export function extractResponsesToolCalls(payload) {
     return toolCalls.length ? toolCalls : null;
 }
 
+export function cleanAssistantText(text) {
+    if (!text || typeof text !== 'string') return text;
+
+    let cleaned = text;
+    cleaned = cleaned.replace(/^(The user message is:[^\n]*\n?)+/gim, '');
+    cleaned = cleaned.replace(/^(First, the user message is[^\n]*\n?)+/gim, '');
+    cleaned = cleaned.replace(/^(I'm (?:the|acting as)[^\n]*\n?)+/gim, '');
+    cleaned = cleaned.replace(/^(My goal:[^\n]*\n?)+/gim, '');
+    cleaned = cleaned.replace(/^(The instructions:[^\n]*\n?)+/gim, '');
+    cleaned = cleaned.replace(/^(From history:[^\n]*\n?)+/gim, '');
+    cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+
+    return cleaned.trim();
+}
+
 export function responsesToChatCompletions(payload, { model } = {}) {
-    const text = extractResponsesText(payload);
+    const text = cleanAssistantText(extractResponsesText(payload));
     const toolCalls = extractResponsesToolCalls(payload);
     const message = { role: 'assistant', content: text || null };
     if (toolCalls) message.tool_calls = toolCalls;
@@ -154,19 +212,31 @@ export function responsesToChatCompletions(payload, { model } = {}) {
 export function extractStreamTextDelta(event) {
     if (!event || typeof event !== 'object') return '';
 
-    if (typeof event.delta === 'string') return event.delta;
-    if (typeof event.text === 'string') return event.text;
-    if (typeof event.output_text === 'string') return event.output_text;
-
-    if (event.delta && typeof event.delta === 'object') {
-        if (typeof event.delta.text === 'string') return event.delta.text;
-        if (typeof event.delta.content === 'string') return event.delta.content;
+    const type = String(event.type || '');
+    if (
+        type.includes('reasoning') ||
+        type.includes('summary') ||
+        type.includes('encrypted')
+    ) {
+        return '';
     }
 
-    const type = event.type || '';
-    if (type.includes('output_text') && typeof event.part?.text === 'string') {
-        return event.part.text;
+    if (type.includes('output_text') || type.includes('content_part')) {
+        if (typeof event.delta === 'string') return event.delta;
+        if (typeof event.text === 'string') return event.text;
+        if (event.delta && typeof event.delta === 'object') {
+            if (typeof event.delta.text === 'string') return event.delta.text;
+        }
+        if (typeof event.part?.text === 'string') return event.part.text;
     }
 
     return '';
+}
+
+export function emitContentAsStream(content, onUpdate) {
+    if (!content || !onUpdate) return;
+    const chunkSize = 24;
+    for (let i = 0; i < content.length; i += chunkSize) {
+        onUpdate({ type: 'token', content: content.slice(i, i + chunkSize) });
+    }
 }
