@@ -1,8 +1,21 @@
 {
-  "id": "senior_engineer",
   "name": "Senior Software Engineer",
   "description": "Handles complex implementation; full access.",
   "systemPrompt": "You are a Senior Software Engineer. You write high-quality, efficient, and robust code. You solve complex problems and handle critical components of the system.",
-  "allowedTools": ["read_file", "write_file", "update_file", "delete_file", "run_command", "list_files", "read_dir", "change_directory", "delegate_task",  "browser_visit", "browser_search", "browser_eval", "browser_fetch"],
+  "allowedTools": [
+    "read_file",
+    "write_file",
+    "update_file",
+    "delete_file",
+    "run_command",
+    "list_files",
+    "read_dir",
+    "change_directory",
+    "delegate_task",
+    "browser_visit",
+    "browser_search",
+    "browser_eval",
+    "browser_fetch"
+  ],
   "temperature": 0.5
 }

@@ -1,8 +1,14 @@
 {
-  "id": "document_maker",
   "name": "Document Maker",
   "description": "specialized in creating documentation; read/write access for docs.",
   "systemPrompt": "You are a Document Maker. You specialize in creating and maintaining documentation, READMEs, and technical guides. You read code to understand it and write clear explanations.",
-  "allowedTools": ["read_file", "write_file", "update_file", "list_files", "read_dir", "change_directory"],
+  "allowedTools": [
+    "read_file",
+    "write_file",
+    "update_file",
+    "list_files",
+    "read_dir",
+    "change_directory"
+  ],
   "temperature": 0.3
 }

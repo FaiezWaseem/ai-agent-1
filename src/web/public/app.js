@@ -10,7 +10,7 @@ const AVATAR_COLORS = [
 ];
 
 const state = {
-  viewMode: 'channel', // 'channel' | 'dm'
+  viewMode: 'channel', // 'channel' | 'dm' | 'inbox'
   currentChannelId: null,
   currentChannel: null,
   currentSessionId: null,
@@ -29,7 +29,10 @@ const state = {
   allTools: [],
   replyTo: null,
   messagesById: new Map(),
+  inboxItems: [],
 };
+
+const INBOX_READ_KEY = 'ai-agent-inbox-read';
 
 const els = {};
 
@@ -40,6 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadChannels();
   loadSessions();
   loadPersonas();
+  updateInboxBadge();
   els.messageInput.focus();
 });
 
@@ -49,6 +53,9 @@ function cacheElements() {
   els.dmsList = document.getElementById('dms-list');
   els.channelMembers = document.getElementById('channel-members');
   els.inboxBadge = document.getElementById('inbox-badge');
+  els.openInbox = document.getElementById('open-inbox');
+  els.inboxMarkRead = document.getElementById('inbox-mark-read');
+  els.composerWrap = document.querySelector('.composer-wrap');
   els.channelTitle = document.getElementById('channel-title');
   els.memberCount = document.getElementById('member-count');
   els.chatScroll = document.getElementById('chat-scroll');
@@ -148,6 +155,8 @@ function bindEvents() {
   els.closeModalX.addEventListener('click', closeCreateAgentModal);
 
   els.openGlobalSettings?.addEventListener('click', () => openSettingsModal('global'));
+  els.openInbox?.addEventListener('click', openInbox);
+  els.inboxMarkRead?.addEventListener('click', markAllInboxRead);
   els.openAgentSettings?.addEventListener('click', () => openSettingsModal('agent'));
   els.saveSettingsBtn?.addEventListener('click', saveSettings);
   els.cancelSettingsBtn?.addEventListener('click', closeSettingsModal);
@@ -296,6 +305,9 @@ function renderSidebar() {
     if (state.viewMode === 'channel' && channel.id === state.currentChannelId) {
       item.classList.add('active');
     }
+    if (state.viewMode === 'inbox') {
+      item.classList.remove('active');
+    }
     item.innerHTML = `<span class="prefix">#</span><span>${escapeHtml(channel.name)}</span>`;
     item.onclick = () => selectChannel(channel.id);
     els.channelsList.appendChild(item);
@@ -311,12 +323,176 @@ function renderSidebar() {
     if (state.viewMode === 'dm' && session.id === state.currentSessionId) {
       dmItem.classList.add('active');
     }
+    if (state.viewMode === 'inbox') {
+      dmItem.classList.remove('active');
+    }
     dmItem.innerHTML = `<span class="dm-avatar" style="background:${av.color}">${av.emoji}</span><span>${escapeHtml(session.name || session.id)}</span>`;
     dmItem.onclick = () => selectSession(session.id, session.model, session.name || session.id);
     els.dmsList.appendChild(dmItem);
   });
 
-  els.inboxBadge.textContent = String(state.channels.length);
+  const unread = getUnreadInboxCount();
+  els.inboxBadge.textContent = String(unread);
+  els.inboxBadge.classList.toggle('hidden', unread === 0);
+  els.openInbox?.classList.toggle('active', state.viewMode === 'inbox');
+}
+
+function getInboxReadSet() {
+  try {
+    const raw = localStorage.getItem(INBOX_READ_KEY);
+    return new Set(JSON.parse(raw || '[]'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveInboxReadSet(set) {
+  localStorage.setItem(INBOX_READ_KEY, JSON.stringify([...set]));
+}
+
+function getUnreadInboxCount() {
+  const read = getInboxReadSet();
+  return state.inboxItems.filter((item) => item.isFromAgent && !read.has(item.id)).length;
+}
+
+function markInboxItemRead(itemId) {
+  const read = getInboxReadSet();
+  read.add(itemId);
+  saveInboxReadSet(read);
+  updateInboxBadge();
+}
+
+function markAllInboxRead() {
+  const read = getInboxReadSet();
+  state.inboxItems.forEach((item) => read.add(item.id));
+  saveInboxReadSet(read);
+  updateInboxBadge();
+  renderInbox();
+}
+
+async function updateInboxBadge() {
+  try {
+    const res = await fetch('/api/inbox');
+    state.inboxItems = await res.json();
+    const count = getUnreadInboxCount();
+    els.inboxBadge.textContent = String(count);
+    els.inboxBadge.classList.toggle('hidden', count === 0);
+  } catch (e) {
+    console.error('Failed to load inbox', e);
+  }
+}
+
+async function openInbox() {
+  state.viewMode = 'inbox';
+  state.currentChannelId = null;
+  state.currentSessionId = null;
+  state.currentChannel = null;
+  clearReply();
+
+  els.channelTitle.textContent = 'Inbox';
+  els.memberCount.textContent = '';
+  els.channelMembers.classList.add('hidden');
+  els.inboxMarkRead?.classList.remove('hidden');
+  els.composerWrap?.classList.add('hidden');
+  els.messageInput.placeholder = 'Select a conversation from Inbox';
+  els.quickActions.classList.add('hidden');
+
+  renderSidebar();
+
+  try {
+    const res = await fetch('/api/inbox');
+    state.inboxItems = await res.json();
+    renderInbox();
+    updateInboxBadge();
+  } catch (e) {
+    console.error('Failed to open inbox', e);
+    els.messages.innerHTML = '<div class="inbox-empty">Could not load inbox.</div>';
+  }
+}
+
+function renderInbox() {
+  const read = getInboxReadSet();
+  els.messages.innerHTML = '';
+
+  const header = document.createElement('div');
+  header.className = 'inbox-header';
+  header.innerHTML = `<h2>Activity</h2><p>Recent messages and background task updates across your workspace.</p>`;
+  els.messages.appendChild(header);
+
+  if (!state.inboxItems.length) {
+    const empty = document.createElement('div');
+    empty.className = 'inbox-empty';
+    empty.textContent = 'No activity yet. Start a conversation in a channel or DM.';
+    els.messages.appendChild(empty);
+    scrollToBottom();
+    return;
+  }
+
+  const list = document.createElement('div');
+  list.className = 'inbox-list';
+
+  state.inboxItems.forEach((item) => {
+    const unread = !read.has(item.id);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `inbox-item${unread ? ' unread' : ''}`;
+    btn.dataset.itemId = item.id;
+
+    const icon = item.type === 'channel' ? '#' : item.type === 'dm' ? '💬' : '⏱';
+    const typeLabel = item.type === 'background' ? 'Background task' : item.title;
+    const time = formatInboxTime(item.timestamp);
+
+    btn.innerHTML = `
+      <span class="inbox-item-icon">${icon}</span>
+      <span class="inbox-item-body">
+        <span class="inbox-item-top">
+          <span class="inbox-item-title">${escapeHtml(typeLabel)}</span>
+          <span class="inbox-item-time">${escapeHtml(time)}</span>
+        </span>
+        <span class="inbox-item-meta">${escapeHtml(item.author)}${item.taskStatus ? ` · ${escapeHtml(item.taskStatus)}` : ''}</span>
+        <span class="inbox-item-preview">${escapeHtml(item.preview || '(no content)')}</span>
+      </span>
+      ${unread ? '<span class="inbox-unread-dot"></span>' : ''}
+    `;
+
+    btn.addEventListener('click', () => handleInboxItemClick(item));
+    list.appendChild(btn);
+  });
+
+  els.messages.appendChild(list);
+  scrollToBottom();
+}
+
+function formatInboxTime(timestamp) {
+  if (!timestamp) return '';
+  const date = new Date(timestamp);
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return 'Just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  return date.toLocaleDateString();
+}
+
+async function handleInboxItemClick(item) {
+  markInboxItemRead(item.id);
+
+  if (item.type === 'channel') {
+    await selectChannel(item.sourceId);
+  } else if (item.type === 'dm') {
+    await selectSession(item.sourceId, null, item.sourceName);
+  } else if (item.type === 'background') {
+    await selectSession(item.sourceId, null, item.sourceName);
+  }
+
+  updateInboxBadge();
+}
+
+function showConversationChrome() {
+  els.inboxMarkRead?.classList.add('hidden');
+  els.composerWrap?.classList.remove('hidden');
 }
 
 function renderChannelMembers(channel) {
@@ -342,6 +518,7 @@ async function selectChannel(channelId) {
   state.currentChannelId = channelId;
   state.currentSessionId = null;
   clearReply();
+  showConversationChrome();
 
   const res = await fetch(`/api/channels/${channelId}`);
   const channel = await res.json();
@@ -447,6 +624,7 @@ async function selectSession(id, modelId = null, name = 'Agent') {
   state.currentSessionName = name;
   state.currentChannel = null;
   clearReply();
+  showConversationChrome();
 
   els.channelTitle.textContent = name;
   els.messageInput.placeholder = `Message ${name}`;
@@ -811,10 +989,12 @@ async function sendMessage() {
 
     removeThinking(thinkingId);
     scrollToBottom();
+    updateInboxBadge();
   } catch (e) {
     removeThinking(thinkingId);
     appendMessage('assistant', 'Error sending message');
     console.error(e);
+    updateInboxBadge();
   }
 }
 
@@ -926,10 +1106,12 @@ async function sendChannelMessage(text, images) {
 
     removeThinking(thinkingId);
     scrollToBottom();
+    updateInboxBadge();
   } catch (e) {
     removeThinking(thinkingId);
     appendMessage('assistant', 'Error sending message', [], 'System');
     console.error(e);
+    updateInboxBadge();
   }
 }
 

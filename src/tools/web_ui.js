@@ -18,6 +18,7 @@ import {
     formatReplyPrefix,
 } from '../channelManager.js';
 import { registerAgentManagerGetter } from './scheduler.js';
+import { getInboxItems } from '../inbox.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -140,6 +141,17 @@ export const webUiTools = {
             }
             const updated = await mergeConfigUpdate(body);
             res.json(updated);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // --- Inbox (activity feed) ---
+    app.get('/api/inbox', async (req, res) => {
+        try {
+            const mgr = await getManager();
+            const items = await getInboxItems(mgr);
+            res.json(items);
         } catch (e) {
             res.status(500).json({ error: e.message });
         }

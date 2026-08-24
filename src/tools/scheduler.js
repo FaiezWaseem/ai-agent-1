@@ -295,6 +295,12 @@ export const schedulerToolDefinitions = [
     },
 ];
 
+export function getRecentBackgroundTasks(limit = 20) {
+    return Array.from(backgroundTasks.values())
+        .sort((a, b) => (b.completedAt || b.startedAt || '').localeCompare(a.completedAt || a.startedAt || ''))
+        .slice(0, Math.max(1, limit));
+}
+
 export const schedulerTools = {
     schedule_task: async ({ cron_expression, command, id }, { agent, confirmCallback }) => {
         if (!cron.validate(cron_expression)) {

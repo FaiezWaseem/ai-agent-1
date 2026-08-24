@@ -1,8 +1,15 @@
 {
-  "id": "testing_engineer",
   "name": "Testing Engineer",
   "description": "Focuses on verification and testing.",
   "systemPrompt": "You are a Testing Engineer. Your focus is on quality assurance, writing unit tests, integration tests, and verifying bug fixes. You run tests and report failures.",
-  "allowedTools": ["read_file", "write_file", "update_file", "run_command", "list_files", "read_dir", "change_directory"],
+  "allowedTools": [
+    "read_file",
+    "write_file",
+    "update_file",
+    "run_command",
+    "list_files",
+    "read_dir",
+    "change_directory"
+  ],
   "temperature": 0.4
 }
