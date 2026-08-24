@@ -196,6 +196,18 @@ function cacheElements() {
   els.closeSettingsX = document.getElementById('close-settings-x');
   els.openGlobalSettings = document.getElementById('open-global-settings');
   els.openAgentSettings = document.getElementById('open-agent-settings');
+  els.openChannelSettings = document.getElementById('open-channel-settings');
+  els.channelSettingsModal = document.getElementById('channel-settings-modal');
+  els.saveChannelSettingsBtn = document.getElementById('save-channel-settings-btn');
+  els.cancelChannelSettingsBtn = document.getElementById('cancel-channel-settings-btn');
+  els.closeChannelSettingsX = document.getElementById('close-channel-settings-x');
+  els.deleteChannelBtn = document.getElementById('delete-channel-btn');
+  els.deleteAgentBtn = document.getElementById('delete-agent-btn');
+  els.cfgChannelAllReply = document.getElementById('cfg-channel-all-reply');
+  els.cfgChannelAgentDiscussion = document.getElementById('cfg-channel-agent-discussion');
+  els.channelSettingsName = document.getElementById('channel-settings-name');
+  els.channelAllReply = document.getElementById('channel-all-reply');
+  els.channelAgentDiscussion = document.getElementById('channel-agent-discussion');
   els.cfgProvider = document.getElementById('cfg-provider');
   els.cfgModel = document.getElementById('cfg-model');
   els.cfgBaseUrl = document.getElementById('cfg-base-url');
@@ -265,6 +277,12 @@ function bindEvents() {
   els.openInbox?.addEventListener('click', openInbox);
   els.inboxMarkRead?.addEventListener('click', markAllInboxRead);
   els.openAgentSettings?.addEventListener('click', () => openSettingsModal('agent'));
+  els.openChannelSettings?.addEventListener('click', openChannelSettingsModal);
+  els.saveChannelSettingsBtn?.addEventListener('click', saveChannelSettings);
+  els.cancelChannelSettingsBtn?.addEventListener('click', closeChannelSettingsModal);
+  els.closeChannelSettingsX?.addEventListener('click', closeChannelSettingsModal);
+  els.deleteChannelBtn?.addEventListener('click', deleteCurrentChannel);
+  els.deleteAgentBtn?.addEventListener('click', deleteSelectedAgent);
   els.saveSettingsBtn?.addEventListener('click', saveSettings);
   els.cancelSettingsBtn?.addEventListener('click', closeSettingsModal);
   els.closeSettingsX?.addEventListener('click', closeSettingsModal);
@@ -276,7 +294,7 @@ function bindEvents() {
   });
 
   // Close modals when clicking backdrop
-  [els.createChannelModal, els.createAgentModal, els.settingsModal, els.selectAgentModal].forEach((modal) => {
+  [els.createChannelModal, els.createAgentModal, els.settingsModal, els.selectAgentModal, els.channelSettingsModal].forEach((modal) => {
     modal?.addEventListener('click', (e) => {
       if (e.target === modal) {
         modal.classList.remove('show');
@@ -519,6 +537,7 @@ async function openInbox(options = {}) {
   els.composerWrap?.classList.add('hidden');
   els.messageInput.placeholder = 'Select a conversation from Inbox';
   els.quickActions.classList.add('hidden');
+  updateChannelHeaderActions();
 
   renderSidebar();
 
@@ -622,6 +641,21 @@ function showConversationChrome() {
   els.composerWrap?.classList.remove('hidden');
 }
 
+function updateChannelHeaderActions() {
+  const inChannel = state.viewMode === 'channel' && state.currentChannelId;
+  els.openChannelSettings?.classList.toggle('hidden', !inChannel);
+  els.openAgentSettings?.classList.toggle('hidden', inChannel);
+}
+
+function channelSettingsHint(channel) {
+  const s = channel?.settings || {};
+  const parts = [];
+  if (s.allParticipantsReply) parts.push('all agents reply');
+  if (s.agentDiscussion) parts.push('discussion round enabled');
+  if (!parts.length) parts.push('mention @agent or message goes to channel lead');
+  return `Channel mode: ${parts.join(' · ')}. Each agent sees teammates' replies this turn.`;
+}
+
 function renderChannelMembers(channel) {
   if (!channel?.agents?.length) {
     els.channelMembers.classList.add('hidden');
@@ -660,6 +694,7 @@ async function selectChannel(channelId, options = {}) {
   els.messageInput.placeholder = `Message #${channel.name} — use @pm @lead to assign tasks`;
   renderChannelMembers(channel);
   renderSidebar();
+  updateChannelHeaderActions();
 
   if (updateUrl) {
     setAppRoute({ view: 'channel', id: channelId }, { replace: replaceUrl });
@@ -676,7 +711,7 @@ async function selectChannel(channelId, options = {}) {
 
   const hint = document.createElement('div');
   hint.className = 'mention-hint';
-  hint.textContent = `Agents in this channel share memory. Mention someone with @id (e.g. @pm @lead) or message the channel lead.`;
+  hint.textContent = channelSettingsHint(channel);
   els.messages.appendChild(hint);
 
   await loadChannelMessages(channelId);
@@ -691,7 +726,8 @@ async function loadChannelMessages(channelId) {
       if (msg.role === 'user') {
         appendMessage('user', msg.content || '', [], 'You', { id: msg.id, replyTo: msg.replyTo, timestamp: msg.timestamp });
       } else if (msg.role === 'assistant') {
-        appendMessage('assistant', msg.content || '', [], msg.author || msg.agentId || 'Agent', { id: msg.id, timestamp: msg.timestamp });
+        const label = msg.kind === 'discussion' ? `${msg.author || msg.agentId} (discussion)` : (msg.author || msg.agentId || 'Agent');
+        appendMessage('assistant', msg.content || '', [], label, { id: msg.id, timestamp: msg.timestamp });
       }
     });
 
@@ -719,6 +755,131 @@ function closeCreateChannelModal() {
   els.createChannelModal.classList.remove('show');
 }
 
+function openChannelSettingsModal() {
+  if (!state.currentChannel) return;
+  const s = state.currentChannel.settings || {};
+  if (els.channelSettingsName) {
+    els.channelSettingsName.textContent = `#${state.currentChannel.name}`;
+  }
+  if (els.cfgChannelAllReply) els.cfgChannelAllReply.checked = Boolean(s.allParticipantsReply);
+  if (els.cfgChannelAgentDiscussion) els.cfgChannelAgentDiscussion.checked = Boolean(s.agentDiscussion);
+  els.channelSettingsModal?.classList.add('show');
+}
+
+function closeChannelSettingsModal() {
+  els.channelSettingsModal?.classList.remove('show');
+}
+
+async function saveChannelSettings() {
+  if (!state.currentChannelId) return;
+  try {
+    const res = await fetch(`/api/channels/${state.currentChannelId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        settings: {
+          allParticipantsReply: Boolean(els.cfgChannelAllReply?.checked),
+          agentDiscussion: Boolean(els.cfgChannelAgentDiscussion?.checked),
+        },
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to save channel settings');
+    }
+    const updated = await res.json();
+    state.currentChannel = { ...state.currentChannel, ...updated, settings: updated.settings };
+    closeChannelSettingsModal();
+    els.messageInput.placeholder = `Message #${state.currentChannel.name} — use @pm @lead to assign tasks`;
+    await loadChannels();
+  } catch (e) {
+    alert(e.message || 'Failed to save channel settings');
+  }
+}
+
+async function deleteCurrentChannel() {
+  if (!state.currentChannelId || !state.currentChannel) return;
+
+  const name = state.currentChannel.name || state.currentChannelId;
+  const confirmed = confirm(
+    `Delete channel #${name}?\n\nThis removes all messages and per-channel agent memory. This cannot be undone.`
+  );
+  if (!confirmed) return;
+
+  const deletedId = state.currentChannelId;
+
+  try {
+    const res = await fetch(`/api/channels/${encodeURIComponent(deletedId)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to delete channel');
+    }
+
+    closeChannelSettingsModal();
+    state.currentChannelId = null;
+    state.currentChannel = null;
+    await loadChannels();
+
+    const next = state.channels.find((c) => c.id === 'welcome') || state.channels[0];
+    if (next) {
+      await selectChannel(next.id, { replaceUrl: true });
+    } else {
+      state.viewMode = null;
+      els.messages.innerHTML = '';
+      els.quickActions?.classList.remove('hidden');
+      setAppRoute({ view: 'channel', id: '' }, { replace: true });
+      history.replaceState(null, '', '#/');
+    }
+  } catch (e) {
+    alert(e.message || 'Failed to delete channel');
+  }
+}
+
+async function deleteSelectedAgent() {
+  const agentId = els.cfgAgentSelect?.value || state.settingsAgentId;
+  if (!agentId) {
+    alert('Select an agent first');
+    return;
+  }
+
+  const agentName =
+    state.sessions.find((s) => s.id === agentId)?.name ||
+    els.cfgAgentName?.value?.trim() ||
+    agentId;
+
+  const confirmed = confirm(
+    `Delete agent "${agentName}"?\n\nThis removes chat history and removes the agent from all channels. This cannot be undone.`
+  );
+  if (!confirmed) return;
+
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(agentId)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to delete agent');
+    }
+
+    closeSettingsModal();
+    const wasCurrentDm = state.viewMode === 'dm' && state.currentSessionId === agentId;
+    state.currentSessionId = null;
+    await Promise.all([loadSessions(), loadChannels()]);
+
+    if (wasCurrentDm) {
+      const next = state.sessions[0];
+      if (next) {
+        await selectSession(next.id, null, next.name, { replaceUrl: true });
+      } else {
+        state.viewMode = null;
+        els.messages.innerHTML = '';
+        els.quickActions?.classList.remove('hidden');
+        history.replaceState(null, '', '#/');
+      }
+    }
+  } catch (e) {
+    alert(e.message || 'Failed to delete agent');
+  }
+}
+
 async function saveChannel() {
   const name = document.getElementById('channel-name').value.trim();
   const description = document.getElementById('channel-desc').value.trim();
@@ -733,7 +894,15 @@ async function saveChannel() {
     const res = await fetch('/api/channels', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, description, agentIds }),
+      body: JSON.stringify({
+        name,
+        description,
+        agentIds,
+        settings: {
+          allParticipantsReply: Boolean(els.channelAllReply?.checked),
+          agentDiscussion: Boolean(els.channelAgentDiscussion?.checked),
+        },
+      }),
     });
 
     if (res.ok) {
@@ -769,6 +938,7 @@ async function selectSession(id, modelId = null, name = 'Agent', options = {}) {
   els.channelMembers.classList.add('hidden');
   els.memberCount.textContent = '1';
   renderSidebar();
+  updateChannelHeaderActions();
 
   if (updateUrl) {
     setAppRoute({ view: 'dm', id }, { replace: replaceUrl });
@@ -1205,16 +1375,24 @@ async function sendChannelMessage(text, images) {
           if (data.type === 'agent_start') {
             removeThinking(thinkingId);
             currentAuthor = data.agent || data.agentId;
-            currentResponseDiv = createMessageRow('assistant', currentAuthor);
-            const streamMsgId = currentResponseDiv.dataset.msgId;
-            state.messagesById.set(streamMsgId, {
-              id: streamMsgId,
-              role: 'assistant',
-              author: currentAuthor,
-              content: '',
-            });
-            els.messages.appendChild(currentResponseDiv);
-            scrollToBottom();
+            const authorLabel = data.kind === 'discussion' ? `${currentAuthor} (discussion)` : currentAuthor;
+            if (data.kind === 'discussion') {
+              currentResponseDiv = null;
+            }
+            if (!currentResponseDiv || currentAuthor !== (data.agent || data.agentId) || data.kind === 'discussion') {
+              currentResponseDiv = createMessageRow('assistant', authorLabel);
+              const streamMsgId = currentResponseDiv.dataset.msgId;
+              state.messagesById.set(streamMsgId, {
+                id: streamMsgId,
+                role: 'assistant',
+                author: authorLabel,
+                content: '',
+              });
+              els.messages.appendChild(currentResponseDiv);
+              scrollToBottom();
+            }
+          } else if (data.type === 'agent_skip') {
+            removeThinking(thinkingId);
           } else if (data.type === 'thinking') {
             if (!currentResponseDiv) {
               updateThinking(thinkingId, data.message || 'Analyzing request...');
@@ -1651,6 +1829,7 @@ function switchSettingsTab(tab) {
   });
   document.getElementById('settings-tab-global')?.classList.toggle('hidden', tab !== 'global');
   document.getElementById('settings-tab-agent')?.classList.toggle('hidden', tab !== 'agent');
+  els.deleteAgentBtn?.classList.toggle('hidden', tab !== 'agent');
 }
 
 function resolveSettingsAgentId(preferredId = null) {
@@ -1796,9 +1975,17 @@ async function loadAgentSettingsForm(agentId) {
       div.innerHTML = `<input type="checkbox" id="cfg-tool-${tool.name}" value="${tool.name}" ${checked}><label for="cfg-tool-${tool.name}">${tool.name}</label>`;
       els.cfgAgentTools.appendChild(div);
     });
+    updateDeleteAgentButtonState();
   } catch (e) {
     console.error('Failed to load agent settings', e);
   }
+}
+
+function updateDeleteAgentButtonState() {
+  if (!els.deleteAgentBtn) return;
+  const onlyOne = state.sessions.length <= 1;
+  els.deleteAgentBtn.disabled = onlyOne;
+  els.deleteAgentBtn.title = onlyOne ? 'Cannot delete the last agent' : '';
 }
 
 async function saveSettings() {

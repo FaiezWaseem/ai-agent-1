@@ -5,6 +5,24 @@ import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 
 const DB_FILE = path.join(process.cwd(), '.agent', '.ai-agent-chat.sqlite');
+const DEFAULT_SCOPE_KEY = 'dm';
+
+async function ensureScopeColumn(db) {
+    try {
+        await db.exec("ALTER TABLE chat_sessions ADD COLUMN scope_key TEXT DEFAULT 'dm'");
+    } catch {
+        // Column already exists
+    }
+    await db.exec(`
+        UPDATE chat_sessions
+        SET scope_key = 'dm'
+        WHERE scope_key IS NULL OR scope_key = ''
+    `);
+}
+
+export function scopeKeyForChannel(channelId) {
+    return `channel:${channelId}`;
+}
 const MAX_SIZE_BYTES = 100 * 1024 * 1024; // Keep this for file size check if needed, but per-agent limits are handled differently now
 
 let dbPromise = null;
@@ -99,6 +117,8 @@ async function initDb() {
         console.error("Migration warning:", e);
     }
 
+    await ensureScopeColumn(db);
+
     return db;
 }
 
@@ -109,14 +129,14 @@ function getDb() {
     return dbPromise;
 }
 
-export async function loadChatHistory(agentId) {
+export async function loadChatHistory(agentId, scopeKey = DEFAULT_SCOPE_KEY) {
     try {
         const db = await getDb();
         
-        // Get the latest session for this agent
         const session = await db.get(
-            "SELECT id FROM chat_sessions WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
-            agentId
+            "SELECT id FROM chat_sessions WHERE agent_id = ? AND scope_key = ? ORDER BY id DESC LIMIT 1",
+            agentId,
+            scopeKey
         );
 
         if (!session) {
@@ -154,7 +174,7 @@ export async function loadChatHistory(agentId) {
     }
 }
 
-export async function saveChatHistory(agentId, messages, agentInstance = null) {
+export async function saveChatHistory(agentId, messages, agentInstance = null, scopeKey = DEFAULT_SCOPE_KEY) {
     const db = await getDb();
 
     // 1. Ensure Agent Exists
@@ -179,12 +199,17 @@ export async function saveChatHistory(agentId, messages, agentInstance = null) {
     // Since we overwrite history in the current logic, let's keep it simple:
     // If we are saving, we are appending to the current "active" session.
     let session = await db.get(
-        "SELECT id FROM chat_sessions WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
-        agentId
+        "SELECT id FROM chat_sessions WHERE agent_id = ? AND scope_key = ? ORDER BY id DESC LIMIT 1",
+        agentId,
+        scopeKey
     );
 
     if (!session) {
-        const result = await db.run("INSERT INTO chat_sessions (agent_id) VALUES (?)", agentId);
+        const result = await db.run(
+            "INSERT INTO chat_sessions (agent_id, scope_key) VALUES (?, ?)",
+            agentId,
+            scopeKey
+        );
         session = { id: result.lastID };
     }
 
@@ -214,8 +239,22 @@ export async function saveChatHistory(agentId, messages, agentInstance = null) {
     await stmt.finalize();
 }
 
-export async function clearChatHistory(agentId = null) {
+export async function clearChannelScopeHistory(channelId) {
     const db = await getDb();
+    const scopeKey = scopeKeyForChannel(channelId);
+    await db.run('DELETE FROM chat_sessions WHERE scope_key = ?', scopeKey);
+}
+
+export async function clearChatHistory(agentId = null, scopeKey = null) {
+    const db = await getDb();
+    if (agentId && scopeKey) {
+        await db.run(
+            "DELETE FROM chat_sessions WHERE agent_id = ? AND scope_key = ?",
+            agentId,
+            scopeKey
+        );
+        return;
+    }
     if (agentId) {
         await db.run("DELETE FROM agents WHERE agent_id = ?", agentId);
     } else {

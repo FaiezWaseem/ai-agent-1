@@ -4,7 +4,7 @@ import { readFile, writeFile, listFiles } from './tools/fs.js';
 import { runCommand } from './tools/shell.js';
 import { tools as toolImplementations, toolDefinitions } from './tools/index.js';
 import { loadPersona } from './personas/index.js';
-import { loadChatHistory, saveChatHistory } from './chatStorage.js';
+import { loadChatHistory, saveChatHistory, scopeKeyForChannel } from './chatStorage.js';
 import { summarizeMemory } from './memory/summary.js';
 import { sendMessage as sendTelegramMessage } from './tools/telegram.js';
 import chalk from 'chalk';
@@ -16,7 +16,9 @@ export class Agent {
   constructor(config = {}) {
     this.provider = null;
     this.memory = []; // Store chat history
+    this._activeScopeKey = 'dm';
     this._ephemeralContextPrefix = null;
+    this._chatLock = Promise.resolve();
     
     // Config properties
     this.cwd = process.cwd();
@@ -63,21 +65,68 @@ export class Agent {
     const systemPrompt = this._buildSystemPrompt();
     this._setSystemMessage(systemPrompt);
 
+    await this._loadMemoryScope('dm');
+  }
+
+  async _persistMemoryScope() {
+    if (!this._activeScopeKey) return;
+    await saveChatHistory(this.id, this.memory, this, this._activeScopeKey);
+  }
+
+  async _loadMemoryScope(scopeKey) {
+    this._activeScopeKey = scopeKey;
+    const systemPrompt = this._buildSystemPrompt();
+
     try {
-        const history = await loadChatHistory(this.id);
+        const history = await loadChatHistory(this.id, scopeKey);
         if (history && history.length > 0) {
             if (history[0].role === 'system') {
                 history[0].content = systemPrompt;
+                this.memory = history;
             } else {
-                history.unshift({ role: 'system', content: systemPrompt });
+                this.memory = [{ role: 'system', content: systemPrompt }, ...history];
             }
-            this.memory = history;
+        } else {
+            this.memory = [];
+            this._setSystemMessage(systemPrompt);
         }
     } catch (e) {
-        console.error("Failed to load chat history:", e);
+        console.error('Failed to load scoped chat history:', e);
+        this.memory = [];
+        this._setSystemMessage(systemPrompt);
         try {
-            await sendTelegramMessage(`Agent ${this.id} failed to load chat history: ${e.message || e}`);
+            await sendTelegramMessage(`Agent ${this.id} failed to load chat history (${scopeKey}): ${e.message || e}`);
         } catch {}
+    }
+    this._hasSummary = false;
+  }
+
+  async _withChatLock(fn) {
+    let release;
+    const waitFor = this._chatLock;
+    this._chatLock = new Promise((resolve) => { release = resolve; });
+    await waitFor;
+    try {
+        return await fn();
+    } finally {
+        release();
+    }
+  }
+
+  async _withMemoryScope(scopeKey, fn) {
+    const previousScope = this._activeScopeKey || 'dm';
+    const switched = previousScope !== scopeKey;
+    if (switched) {
+        await this._persistMemoryScope();
+        await this._loadMemoryScope(scopeKey);
+    }
+    try {
+        return await fn();
+    } finally {
+        if (switched) {
+            await this._persistMemoryScope();
+            await this._loadMemoryScope(previousScope);
+        }
     }
   }
 
@@ -126,6 +175,15 @@ For any complex task (multi-step, research, or development), you MUST use the "3
 
 NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
 `;
+
+    if (this._activeScopeKey?.startsWith('channel:')) {
+        systemPrompt += `
+IMPORTANT — CHANNEL ISOLATION:
+- Your conversation memory for THIS channel is separate from other channels and from direct messages.
+- Long-term memory saved in this channel stays in this channel only.
+- Only use context from this channel's thread. Do NOT bring up topics from other channels unless the user mentions them here.
+`;
+    }
 
     if (this.additionalContext) {
         systemPrompt += `\n\n${this.additionalContext}\n\nIMPORTANT: The script directory is available at: ${scriptDir}`;
@@ -185,6 +243,10 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
   }
 
   async chat(userMessage, confirmCallback = null, onUpdate = null, options = {}) {
+    return this._withChatLock(async () => {
+    const scopeKey = options.channelId ? scopeKeyForChannel(options.channelId) : 'dm';
+
+    return this._withMemoryScope(scopeKey, async () => {
     // Channel chats inject workspace context per request — don't bloat agent memory with it.
     const memoryContent = options.channelContext
       ? (typeof userMessage === 'string' ? userMessage : userMessage)
@@ -248,7 +310,7 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
 
         // If no tool calls, we are done
         if (!response.toolCalls || response.toolCalls.length === 0) {
-            await saveChatHistory(this.id, this.memory, this);
+            await this._persistMemoryScope();
             if (onUpdate) onUpdate({ type: 'done' });
             this._ephemeralContextPrefix = null;
             return finalResponse || response.content;
@@ -297,9 +359,12 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
         }
     }
     
+    await this._persistMemoryScope();
     if (onUpdate) onUpdate({ type: 'done' });
     this._ephemeralContextPrefix = null;
     return finalResponse;
+    });
+    });
   }
 
   async _safeChat(messages, tools, onUpdate = null) {

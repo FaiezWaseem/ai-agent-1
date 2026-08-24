@@ -182,6 +182,34 @@ export class AgentManager {
             safeMode: agent.safeMode,
         };
     }
+
+    async deleteAgent(id) {
+        if (!this.agents.has(id)) {
+            throw new Error(`Agent ${id} not found`);
+        }
+        if (this.agents.size <= 1) {
+            throw new Error('Cannot delete the last agent');
+        }
+
+        this.agents.delete(id);
+
+        if (this.activeAgentId === id) {
+            this.activeAgentId = this.agents.keys().next().value || null;
+        }
+
+        await this.saveState();
+
+        const { clearChatHistory } = await import('./chatStorage.js');
+        await clearChatHistory(id);
+
+        const { removeAgentFromAllChannels } = await import('./channelManager.js');
+        await removeAgentFromAllChannels(id);
+
+        const agentDir = path.join(process.cwd(), '.agent', id);
+        await fs.rm(agentDir, { recursive: true, force: true }).catch(() => {});
+
+        return { id, deleted: true };
+    }
     
     async listAvailablePersonas() {
         return await listPersonas();

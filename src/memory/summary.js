@@ -96,7 +96,7 @@ export async function summarizeMemory(agent) {
         agent.memory = newMemory;
         
         // Save the compacted memory
-        await saveChatHistory(agent.id, agent.memory, agent);
+        await saveChatHistory(agent.id, agent.memory, agent, agent._activeScopeKey || 'dm');
         
         console.log(chalk.green(`✅ Memory summarized. Reduced from ${messagesToSummarize.length + messagesToKeep.length} to ${newMemory.length} messages.`));
         return true;

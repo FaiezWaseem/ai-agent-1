@@ -1281,6 +1281,52 @@ body {
   margin-top: 18px;
 }
 
+.modal-actions-split {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-actions-left,
+.modal-actions-right {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.danger-zone {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.danger-zone h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #f87171;
+}
+
+.danger-btn {
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.12);
+  color: #fca5a5;
+  margin-top: 8px;
+}
+
+.danger-btn:hover {
+  background: rgba(248, 113, 113, 0.2);
+  color: #fecaca;
+}
+
+.danger-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .primary-btn,
 .secondary-btn {
   border-radius: var(--radius-sm);

@@ -18,7 +18,11 @@ const getMemoryDir = (agent) => {
     if (agent?.memoryDir) {
         return agent.memoryDir;
     }
-    // Default to global memory
+    const scope = agent?._activeScopeKey || 'dm';
+    if (scope.startsWith('channel:')) {
+        const channelId = scope.slice('channel:'.length);
+        return path.join(MEMORY_DIR, 'channels', channelId);
+    }
     return MEMORY_DIR;
 };
 

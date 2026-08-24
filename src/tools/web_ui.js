@@ -16,6 +16,12 @@ import {
     buildChannelContextBlock,
     resolveChannelTargets,
     formatReplyPrefix,
+    buildDiscussionPrompt,
+    resolveDiscussionTargets,
+    isNoReplyContent,
+    normalizeChannelSettings,
+    updateChannel,
+    deleteChannel,
 } from '../channelManager.js';
 import { registerAgentManagerGetter } from './scheduler.js';
 import { getInboxItems } from '../inbox.js';
@@ -190,11 +196,11 @@ export const webUiTools = {
     app.post('/api/channels', async (req, res) => {
         try {
             const mgr = await getManager();
-            const { name, description, agentIds = [] } = req.body;
+            const { name, description, agentIds = [], settings = {} } = req.body;
             if (!name) return res.status(400).json({ error: 'Channel name is required' });
 
             const validIds = agentIds.filter((id) => mgr.getAgent(id));
-            const channel = await createChannel({ name, description, agentIds: validIds });
+            const channel = await createChannel({ name, description, agentIds: validIds, settings });
             res.json(channel);
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -233,6 +239,25 @@ export const webUiTools = {
         }
     });
 
+    app.put('/api/channels/:id', async (req, res) => {
+        try {
+            const channel = await updateChannel(req.params.id, req.body);
+            res.json(channel);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.delete('/api/channels/:id', async (req, res) => {
+        try {
+            const result = await deleteChannel(req.params.id);
+            res.json(result);
+        } catch (e) {
+            const status = e.message === 'Channel not found' ? 404 : 500;
+            res.status(status).json({ error: e.message });
+        }
+    });
+
     app.get('/api/channels/:id/messages', async (req, res) => {
         try {
             const messages = await getChannelMessages(req.params.id);
@@ -252,8 +277,10 @@ export const webUiTools = {
             }
 
             const mgr = await getManager();
-            const channel = await getChannel(channelId);
+            let channel = await getChannel(channelId);
             if (!channel) return res.status(404).send('Channel not found');
+
+            const settings = normalizeChannelSettings(channel.settings);
 
             await appendChannelMessage(channelId, {
                 role: 'user',
@@ -276,13 +303,13 @@ export const webUiTools = {
                 return true;
             };
 
-            const channelContext = buildChannelContextBlock(channel, mgr);
             const replyPrefix = formatReplyPrefix(replyTo);
             const messageBody = `${replyPrefix}${message || ''}`;
+            const peerResponses = [];
 
-            for (const agentId of targets) {
+            async function runAgentTurn(agentId, { prompt, mode, kind = 'response' }) {
                 const agent = mgr.getAgent(agentId);
-                if (!agent) continue;
+                if (!agent) return null;
 
                 if (model) {
                     const resolvedModel = await resolveRequestedModel(model);
@@ -291,43 +318,88 @@ export const webUiTools = {
                     }
                 }
 
-                res.write(`data: ${JSON.stringify({ type: 'agent_start', agent: agent.name || agent.id, agentId: agent.id })}\n\n`);
+                channel = await getChannel(channelId);
+                const channelContext = buildChannelContextBlock(channel, mgr, {
+                    agentId,
+                    peerResponsesThisTurn: peerResponses,
+                    mode,
+                });
 
-                let userMessage = messageBody;
-                if (images?.length > 0) {
+                res.write(`data: ${JSON.stringify({ type: 'agent_start', agent: agent.name || agent.id, agentId: agent.id, kind })}\n\n`);
+
+                let userMessage = prompt;
+                if (images?.length > 0 && mode === 'user_turn') {
                     userMessage = [
-                        { type: 'text', text: messageBody },
+                        { type: 'text', text: prompt },
                         ...images.map((img) => ({ type: 'image_url', image_url: { url: img } })),
                     ];
                 }
 
                 let fullResponse = '';
-
                 const onUpdate = (data) => {
                     if (data.type === 'token') {
                         fullResponse += data.content || '';
-                        res.write(`data: ${JSON.stringify({ ...data, agent: agent.name || agent.id, agentId: agent.id })}\n\n`);
+                        res.write(`data: ${JSON.stringify({ ...data, agent: agent.name || agent.id, agentId: agent.id, kind })}\n\n`);
                     } else {
-                        res.write(`data: ${JSON.stringify({ ...data, agent: agent.name || agent.id, agentId: agent.id })}\n\n`);
+                        res.write(`data: ${JSON.stringify({ ...data, agent: agent.name || agent.id, agentId: agent.id, kind })}\n\n`);
                     }
                 };
 
                 try {
                     await agent.chat(userMessage, confirmCallback, onUpdate, {
                         channelContext,
+                        channelId,
                         replyTo: replyTo || null,
                     });
-                    await appendChannelMessage(channelId, {
+
+                    if (isNoReplyContent(fullResponse)) {
+                        res.write(`data: ${JSON.stringify({ type: 'agent_skip', agentId: agent.id, reason: 'no_reply' })}\n\n`);
+                        return null;
+                    }
+
+                    const entry = {
                         role: 'assistant',
                         author: agent.name || agent.id,
                         agentId: agent.id,
                         content: fullResponse || '(completed)',
-                    });
+                        kind: mode === 'discussion' ? 'discussion' : 'response',
+                    };
+                    await appendChannelMessage(channelId, entry);
+
+                    const result = {
+                        agentId: agent.id,
+                        author: agent.name || agent.id,
+                        content: fullResponse || '',
+                    };
+                    peerResponses.push(result);
+                    return result;
                 } catch (err) {
                     res.write(`data: ${JSON.stringify({ type: 'error', error: err.message, agentId: agent.id })}\n\n`);
+                    return null;
+                } finally {
+                    res.write(`data: ${JSON.stringify({ type: 'agent_done', agentId: agent.id, kind })}\n\n`);
                 }
+            }
 
-                res.write(`data: ${JSON.stringify({ type: 'agent_done', agentId: agent.id })}\n\n`);
+            // Phase 1: respond to the user (each agent sees prior replies this turn)
+            for (const agentId of targets) {
+                await runAgentTurn(agentId, { prompt: messageBody, mode: 'user_turn', kind: 'response' });
+            }
+
+            // Phase 2: optional bounded discussion (one round, [NO_REPLY] to skip — no infinite loops)
+            if (settings.agentDiscussion && settings.maxDiscussionRounds > 0 && peerResponses.length > 1) {
+                const discussionTargets = resolveDiscussionTargets(channel, peerResponses);
+
+                for (let round = 0; round < settings.maxDiscussionRounds; round++) {
+                    for (const agentId of discussionTargets) {
+                        const discussionPrompt = buildDiscussionPrompt(peerResponses);
+                        await runAgentTurn(agentId, {
+                            prompt: discussionPrompt,
+                            mode: 'discussion',
+                            kind: 'discussion',
+                        });
+                    }
+                }
             }
 
             res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
@@ -375,6 +447,20 @@ export const webUiTools = {
             res.json(updated);
         } catch (e) {
             res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.delete('/api/sessions/:id', async (req, res) => {
+        try {
+            const mgr = await getManager();
+            const result = await mgr.deleteAgent(req.params.id);
+            res.json(result);
+        } catch (e) {
+            const status =
+                e.message?.includes('not found') ? 404
+                : e.message?.includes('last agent') ? 400
+                : 500;
+            res.status(status).json({ error: e.message });
         }
     });
 

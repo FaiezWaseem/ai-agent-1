@@ -65,6 +65,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           </button>
           <span class="member-count" id="member-count">4</span>
+          <button class="icon-btn hidden" type="button" title="Channel settings" id="open-channel-settings">⚙️</button>
           <button class="icon-btn" type="button" title="Agent settings" id="open-agent-settings">⚙️</button>
           <button class="icon-btn" type="button" title="More">⋯</button>
         </div>
@@ -212,11 +213,19 @@
           <label>Allowed Tools</label>
           <div id="cfg-agent-tools" class="tools-list"></div>
         </div>
+        <div class="danger-zone">
+          <h3>Danger zone</h3>
+          <p class="form-hint">Permanently delete this agent, its chat history, and remove it from all channels.</p>
+          <button id="delete-agent-btn" class="danger-btn" type="button">Delete Agent</button>
+        </div>
       </div>
 
-      <div class="modal-actions">
+      <div class="modal-actions modal-actions-split">
+        <div class="modal-actions-left"></div>
+        <div class="modal-actions-right">
         <button id="cancel-settings-btn" class="secondary-btn" type="button">Cancel</button>
         <button id="save-settings-btn" class="primary-btn" type="button">Save Settings</button>
+        </div>
       </div>
     </div>
   </div>
@@ -261,6 +270,12 @@
       <div class="form-group">
         <label>Add Agents to Channel</label>
         <div id="channel-agents-list" class="tools-list"></div>
+        <div class="form-group">
+          <label class="checkbox-row"><input id="channel-all-reply" type="checkbox"> All participants reply to user messages</label>
+        </div>
+        <div class="form-group">
+          <label class="checkbox-row"><input id="channel-agent-discussion" type="checkbox"> Allow one agent discussion round (review teammates, no loops)</label>
+        </div>
         <p class="form-hint">Selected agents share channel memory and can delegate tasks to each other.</p>
       </div>
 
@@ -306,6 +321,36 @@
       <div class="modal-actions">
         <button id="cancel-agent-btn" class="secondary-btn" type="button">Cancel</button>
         <button id="save-agent-btn" class="primary-btn" type="button">Create Agent</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="channel-settings-modal" class="modal">
+    <div class="modal-content modal-wide">
+      <div class="modal-header">
+        <h2>Channel Settings</h2>
+        <button id="close-channel-settings-x" class="secondary-btn" type="button" style="border:none;font-size:22px;">×</button>
+      </div>
+      <p class="form-hint" id="channel-settings-name"></p>
+      <div class="form-group">
+        <label class="checkbox-row"><input id="cfg-channel-all-reply" type="checkbox"> All participants reply to user messages</label>
+        <p class="form-hint">When enabled, every agent in the channel responds to each user message (unless you @mention specific agents).</p>
+      </div>
+      <div class="form-group">
+        <label class="checkbox-row"><input id="cfg-channel-agent-discussion" type="checkbox"> Agent discussion round</label>
+        <p class="form-hint">After everyone replies, agents get one optional follow-up to review each other. They use [NO_REPLY] when they have nothing to add — prevents infinite loops.</p>
+      </div>
+      <div class="danger-zone">
+        <h3>Danger zone</h3>
+        <p class="form-hint">Permanently delete this channel, its messages, and per-channel agent memory.</p>
+        <button id="delete-channel-btn" class="danger-btn" type="button">Delete Channel</button>
+      </div>
+      <div class="modal-actions modal-actions-split">
+        <div class="modal-actions-left"></div>
+        <div class="modal-actions-right">
+        <button id="cancel-channel-settings-btn" class="secondary-btn" type="button">Cancel</button>
+        <button id="save-channel-settings-btn" class="primary-btn" type="button">Save</button>
+        </div>
       </div>
     </div>
   </div>
