@@ -118,6 +118,12 @@ function cacheElements() {
   els.replyPreviewAuthor = document.getElementById('reply-preview-author');
   els.replyPreviewSnippet = document.getElementById('reply-preview-snippet');
   els.cancelReplyBtn = document.getElementById('cancel-reply');
+  els.toolDetailSidebar = document.getElementById('tool-detail-sidebar');
+  els.toolDetailBackdrop = document.getElementById('tool-detail-backdrop');
+  els.toolDetailTitle = document.getElementById('tool-detail-title');
+  els.toolDetailSubtitle = document.getElementById('tool-detail-subtitle');
+  els.toolDetailList = document.getElementById('tool-detail-list');
+  els.closeToolDetail = document.getElementById('close-tool-detail');
 }
 
 function bindEvents() {
@@ -201,6 +207,24 @@ function bindEvents() {
       reader.readAsDataURL(file);
     });
     els.imageUpload.value = '';
+  });
+
+  els.messages?.addEventListener('click', (e) => {
+    const pill = e.target.closest('.tool-pill');
+    if (!pill) return;
+    e.preventDefault();
+    const activity = pill.closest('.tool-activity');
+    const toolName = pill.dataset.toolName;
+    if (!activity || !toolName) return;
+    const row = pill.closest('.message-row');
+    const author = row?.querySelector('.msg-author')?.textContent?.trim() || 'Agent';
+    openToolDetailSidebar(toolName, activity, author);
+  });
+
+  els.closeToolDetail?.addEventListener('click', closeToolDetailSidebar);
+  els.toolDetailBackdrop?.addEventListener('click', closeToolDetailSidebar);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeToolDetailSidebar();
   });
 }
 
@@ -1295,6 +1319,10 @@ function getToolActivityEl(row) {
   if (!el) {
     el = document.createElement('div');
     el.className = 'tool-activity';
+    el.innerHTML = `
+      <div class="tool-call-summary hidden"></div>
+      <div class="tool-call-live"></div>
+    `;
     const msgBody = row.querySelector('.msg-body');
     const msgText = row.querySelector('.msg-text');
     if (msgBody && msgText) {
@@ -1306,9 +1334,111 @@ function getToolActivityEl(row) {
   return el;
 }
 
+function incrementToolSummary(activity, toolName) {
+  if (!toolName) return;
+  if (!activity._toolCounts) activity._toolCounts = {};
+  activity._toolCounts[toolName] = (activity._toolCounts[toolName] || 0) + 1;
+  refreshToolSummary(activity);
+}
+
+function refreshToolSummary(activity) {
+  const summary = activity.querySelector('.tool-call-summary');
+  if (!summary) return;
+
+  const counts = activity._toolCounts || {};
+  const entries = Object.entries(counts).filter(([, n]) => n > 0).sort((a, b) => a[0].localeCompare(b[0]));
+
+  if (!entries.length) {
+    summary.classList.add('hidden');
+    summary.innerHTML = '';
+    return;
+  }
+
+  summary.classList.remove('hidden');
+  summary.innerHTML = entries
+    .map(
+      ([name, count]) =>
+        `<button type="button" class="tool-pill" data-tool-name="${escapeHtml(name)}" title="${escapeHtml(name)} × ${count} — click for details"><span class="tool-pill-name">${escapeHtml(name)}</span><span class="tool-pill-count">${count}</span></button>`
+    )
+    .join('');
+}
+
+function recordToolExecution(activity, data, item) {
+  if (!activity || !data?.tool) return;
+
+  let args = data.args;
+  if ((!args || typeof args !== 'object') && item) {
+    const argsEl = item.querySelector('.tool-call-args');
+    if (argsEl?.textContent) {
+      try {
+        args = JSON.parse(argsEl.textContent);
+      } catch {
+        args = { raw: argsEl.textContent };
+      }
+    }
+  }
+
+  if (!activity._toolHistory) activity._toolHistory = {};
+  if (!activity._toolHistory[data.tool]) activity._toolHistory[data.tool] = [];
+
+  activity._toolHistory[data.tool].push({
+    id: item?.dataset.toolCallId || `tool-${Date.now()}`,
+    args: args || {},
+    result: data.result || '',
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function openToolDetailSidebar(toolName, activity, author) {
+  const executions = activity._toolHistory?.[toolName] || [];
+  if (!executions.length) return;
+
+  els.toolDetailTitle.textContent = toolName;
+  els.toolDetailSubtitle.textContent = `${executions.length} execution${executions.length === 1 ? '' : 's'} · ${author}`;
+
+  els.toolDetailList.innerHTML = executions
+    .map((exec, index) => {
+      const argsStr = JSON.stringify(exec.args ?? {}, null, 2);
+      const resultStr = exec.result || '(no output)';
+      const time = exec.timestamp ? formatTime(new Date(exec.timestamp)) : '';
+      return `
+        <article class="tool-detail-item">
+          <div class="tool-detail-item-head">
+            <span class="tool-detail-index">#${index + 1}</span>
+            <span class="tool-detail-time">${escapeHtml(time)}</span>
+          </div>
+          <div class="tool-detail-block">
+            <div class="tool-detail-label">Args</div>
+            <pre class="tool-detail-code">${escapeHtml(argsStr)}</pre>
+          </div>
+          <div class="tool-detail-block">
+            <div class="tool-detail-label">Result</div>
+            <pre class="tool-detail-code tool-detail-result">${escapeHtml(resultStr)}</pre>
+          </div>
+        </article>
+      `;
+    })
+    .join('');
+
+  els.toolDetailSidebar?.classList.remove('hidden');
+  els.toolDetailSidebar?.classList.add('open');
+  els.toolDetailBackdrop?.classList.remove('hidden');
+  els.toolDetailSidebar?.setAttribute('aria-hidden', 'false');
+  els.toolDetailBackdrop?.setAttribute('aria-hidden', 'false');
+}
+
+function closeToolDetailSidebar() {
+  els.toolDetailSidebar?.classList.remove('open');
+  els.toolDetailSidebar?.classList.add('hidden');
+  els.toolDetailBackdrop?.classList.add('hidden');
+  els.toolDetailSidebar?.setAttribute('aria-hidden', 'true');
+  els.toolDetailBackdrop?.setAttribute('aria-hidden', 'true');
+}
+
 function addToolCallEvent(row, data) {
   if (!row) return null;
   const activity = getToolActivityEl(row);
+  const live = activity.querySelector('.tool-call-live');
   const callId = `tool-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const argsStr = data.args ? JSON.stringify(data.args) : '';
 
@@ -1316,6 +1446,7 @@ function addToolCallEvent(row, data) {
   item.className = 'tool-call-item running';
   item.dataset.toolCallId = callId;
   item.dataset.toolName = data.tool || '';
+  if (data.args) item.dataset.toolArgs = JSON.stringify(data.args);
   item.innerHTML = `
     <span class="tool-call-icon">🛠️</span>
     <span class="tool-call-label">Tool Call:</span>
@@ -1323,7 +1454,7 @@ function addToolCallEvent(row, data) {
     <code class="tool-call-args">${escapeHtml(argsStr)}</code>
     <span class="tool-call-status">running</span>
   `;
-  activity.appendChild(item);
+  live.appendChild(item);
   scrollToBottom();
   return callId;
 }
@@ -1333,24 +1464,13 @@ function finishToolCallEvent(row, data) {
   const activity = row.querySelector('.tool-activity');
   if (!activity) return;
 
-  const running = [...activity.querySelectorAll('.tool-call-item.running')];
+  const live = activity.querySelector('.tool-call-live');
+  const running = live ? [...live.querySelectorAll('.tool-call-item.running')] : [];
   const item = [...running].reverse().find((el) => el.dataset.toolName === data.tool) || running[running.length - 1];
-  if (!item) return;
+  recordToolExecution(activity, data, item);
+  if (item) item.remove();
 
-  item.classList.remove('running');
-  item.classList.add('done');
-  const status = item.querySelector('.tool-call-status');
-  if (status) status.textContent = 'done';
-
-  if (data.result) {
-    let preview = item.querySelector('.tool-call-result');
-    if (!preview) {
-      preview = document.createElement('div');
-      preview.className = 'tool-call-result';
-      item.appendChild(preview);
-    }
-    preview.textContent = data.result;
-  }
+  incrementToolSummary(activity, data.tool);
   scrollToBottom();
 }
 
