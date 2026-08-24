@@ -30,6 +30,7 @@ const state = {
   replyTo: null,
   messagesById: new Map(),
   inboxItems: [],
+  suppressUrlUpdate: false,
 };
 
 const INBOX_READ_KEY = 'ai-agent-inbox-read';
@@ -37,15 +38,112 @@ const INBOX_READ_KEY = 'ai-agent-inbox-read';
 const els = {};
 
 document.addEventListener('DOMContentLoaded', () => {
+  bootstrapApp();
+});
+
+async function bootstrapApp() {
   cacheElements();
   bindEvents();
-  loadModels();
-  loadChannels();
-  loadSessions();
-  loadPersonas();
+  initRouting();
+  await loadModels();
+  await Promise.all([loadChannels(), loadSessions(), loadPersonas()]);
   updateInboxBadge();
+
+  const route = parseAppRoute();
+  if (route) {
+    const ok = await navigateToRoute(route, { updateUrl: false });
+    if (!ok && state.channels.length > 0) {
+      const welcome = state.channels.find((c) => c.id === 'welcome') || state.channels[0];
+      await selectChannel(welcome.id, { replaceUrl: true });
+    }
+  } else if (state.channels.length > 0) {
+    const welcome = state.channels.find((c) => c.id === 'welcome') || state.channels[0];
+    await selectChannel(welcome.id, { replaceUrl: true });
+  }
+
   els.messageInput.focus();
-});
+}
+
+function initRouting() {
+  window.addEventListener('hashchange', async () => {
+    if (state.suppressUrlUpdate) return;
+    const route = parseAppRoute();
+    if (route) {
+      await navigateToRoute(route, { updateUrl: false });
+    }
+  });
+}
+
+function parseAppRoute() {
+  const raw = (location.hash || '').replace(/^#/, '').trim();
+  if (!raw || raw === '/') return null;
+
+  const parts = raw.split('/').filter(Boolean);
+  if (parts[0] === 'channel' && parts[1]) {
+    return { view: 'channel', id: decodeURIComponent(parts.slice(1).join('/')) };
+  }
+  if ((parts[0] === 'dm' || parts[0] === 'agent') && parts[1]) {
+    return { view: 'dm', id: decodeURIComponent(parts.slice(1).join('/')) };
+  }
+  if (parts[0] === 'inbox') {
+    return { view: 'inbox' };
+  }
+  return null;
+}
+
+function routeToHash(route) {
+  if (!route?.view) return '#/';
+  if (route.view === 'channel' && route.id) {
+    return `#/channel/${encodeURIComponent(route.id)}`;
+  }
+  if (route.view === 'dm' && route.id) {
+    return `#/dm/${encodeURIComponent(route.id)}`;
+  }
+  if (route.view === 'inbox') {
+    return '#/inbox';
+  }
+  return '#/';
+}
+
+function setAppRoute(route, { replace = false } = {}) {
+  const hash = routeToHash(route);
+  if (location.hash === hash) return;
+
+  state.suppressUrlUpdate = true;
+  if (replace) {
+    history.replaceState(null, '', hash);
+  } else {
+    history.pushState(null, '', hash);
+  }
+  state.suppressUrlUpdate = false;
+}
+
+function updateDocumentTitle(label) {
+  document.title = label ? `${label} · AI Agent` : 'AI Agent';
+}
+
+async function navigateToRoute(route, { updateUrl = true } = {}) {
+  if (route.view === 'channel') {
+    const exists = state.channels.some((c) => c.id === route.id);
+    if (!exists) return false;
+    await selectChannel(route.id, { updateUrl });
+    return true;
+  }
+
+  if (route.view === 'dm') {
+    const session = state.sessions.find((s) => s.id === route.id);
+    if (!session) return false;
+    await selectSession(session.id, session.model, session.name || session.id, { updateUrl });
+    return true;
+  }
+
+  if (route.view === 'inbox') {
+    await openInbox({ updateUrl });
+    return true;
+  }
+
+  return false;
+}
 
 function cacheElements() {
   els.searchInput = document.getElementById('search-input');
@@ -290,11 +388,6 @@ async function loadChannels() {
     const res = await fetch('/api/channels');
     state.channels = await res.json();
     renderSidebar();
-
-    if (!state.currentChannelId && state.channels.length > 0) {
-      const welcome = state.channels.find((c) => c.id === 'welcome') || state.channels[0];
-      await selectChannel(welcome.id);
-    }
   } catch (e) {
     console.error('Failed to load channels', e);
   }
@@ -410,7 +503,8 @@ async function updateInboxBadge() {
   }
 }
 
-async function openInbox() {
+async function openInbox(options = {}) {
+  const { updateUrl = true } = options;
   state.viewMode = 'inbox';
   state.currentChannelId = null;
   state.currentSessionId = null;
@@ -418,6 +512,7 @@ async function openInbox() {
   clearReply();
 
   els.channelTitle.textContent = 'Inbox';
+  updateDocumentTitle('Inbox');
   els.memberCount.textContent = '';
   els.channelMembers.classList.add('hidden');
   els.inboxMarkRead?.classList.remove('hidden');
@@ -426,6 +521,10 @@ async function openInbox() {
   els.quickActions.classList.add('hidden');
 
   renderSidebar();
+
+  if (updateUrl) {
+    setAppRoute({ view: 'inbox' });
+  }
 
   try {
     const res = await fetch('/api/inbox');
@@ -541,7 +640,8 @@ function renderChannelMembers(channel) {
     .join('');
 }
 
-async function selectChannel(channelId) {
+async function selectChannel(channelId, options = {}) {
+  const { updateUrl = true, replaceUrl = false } = options;
   state.viewMode = 'channel';
   state.currentChannelId = channelId;
   state.currentSessionId = null;
@@ -549,13 +649,21 @@ async function selectChannel(channelId) {
   showConversationChrome();
 
   const res = await fetch(`/api/channels/${channelId}`);
+  if (!res.ok) {
+    throw new Error('Channel not found');
+  }
   const channel = await res.json();
   state.currentChannel = channel;
 
   els.channelTitle.textContent = channel.name;
+  updateDocumentTitle(`#${channel.name}`);
   els.messageInput.placeholder = `Message #${channel.name} — use @pm @lead to assign tasks`;
   renderChannelMembers(channel);
   renderSidebar();
+
+  if (updateUrl) {
+    setAppRoute({ view: 'channel', id: channelId }, { replace: replaceUrl });
+  }
 
   els.messages.innerHTML = '';
   state.messagesById.clear();
@@ -645,7 +753,8 @@ async function saveChannel() {
   }
 }
 
-async function selectSession(id, modelId = null, name = 'Agent') {
+async function selectSession(id, modelId = null, name = 'Agent', options = {}) {
+  const { updateUrl = true, replaceUrl = false } = options;
   state.viewMode = 'dm';
   state.currentSessionId = id;
   state.currentChannelId = null;
@@ -655,10 +764,15 @@ async function selectSession(id, modelId = null, name = 'Agent') {
   showConversationChrome();
 
   els.channelTitle.textContent = name;
+  updateDocumentTitle(name);
   els.messageInput.placeholder = `Message ${name}`;
   els.channelMembers.classList.add('hidden');
   els.memberCount.textContent = '1';
   renderSidebar();
+
+  if (updateUrl) {
+    setAppRoute({ view: 'dm', id }, { replace: replaceUrl });
+  }
 
   if (modelId) {
     const model = state.availableModels.find((m) => m.id === modelId);
