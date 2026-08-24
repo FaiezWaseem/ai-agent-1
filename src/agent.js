@@ -262,7 +262,7 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
             console.log(chalk.cyan(`\n🛠️  Tool Call: ${chalk.bold(toolName)}`));
             console.log(chalk.gray(`   Args: ${JSON.stringify(args)}`));
 
-            if (onUpdate) onUpdate({ type: 'tool_start', tool: toolName });
+            if (onUpdate) onUpdate({ type: 'tool_start', tool: toolName, args });
 
             let result;
             try {
@@ -276,7 +276,14 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
                 result = `Error executing tool ${toolName}: ${e.message}`;
             }
 
-            if (onUpdate) onUpdate({ type: 'tool_end', tool: toolName, result: typeof result === 'string' ? result.substring(0, 100) + '...' : 'Done' });
+            if (onUpdate) {
+                onUpdate({
+                    type: 'tool_end',
+                    tool: toolName,
+                    args,
+                    result: typeof result === 'string' ? result.substring(0, 200) : 'Done',
+                });
+            }
 
             // Add result to memory
             let memoryContent = typeof result === 'string' ? result : JSON.stringify(result);

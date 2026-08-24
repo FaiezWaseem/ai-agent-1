@@ -952,8 +952,17 @@ async function sendMessage() {
 
         try {
           const data = JSON.parse(dataStr);
-          if (data.type === 'thinking' || data.type === 'tool_start' || data.type === 'tool_end') {
-            updateThinking(thinkingId, data.message || `Running ${data.tool || 'tools'}...`);
+          if (data.type === 'thinking') {
+            updateThinking(thinkingId, data.message || 'Analyzing request...');
+          } else if (data.type === 'tool_start') {
+            removeThinking(thinkingId);
+            currentResponseDiv = ensureStreamAssistantRow(
+              currentResponseDiv,
+              state.currentSessionName || 'Agent'
+            );
+            addToolCallEvent(currentResponseDiv, data);
+          } else if (data.type === 'tool_end') {
+            finishToolCallEvent(currentResponseDiv, data);
           } else if (data.type === 'token') {
             removeThinking(thinkingId);
             if (!currentResponseDiv) {
@@ -1068,8 +1077,16 @@ async function sendChannelMessage(text, images) {
             });
             els.messages.appendChild(currentResponseDiv);
             scrollToBottom();
-          } else if (data.type === 'thinking' || data.type === 'tool_start' || data.type === 'tool_end') {
-            updateThinking(thinkingId, data.message || `Running ${data.tool || 'tools'}...`);
+          } else if (data.type === 'thinking') {
+            if (!currentResponseDiv) {
+              updateThinking(thinkingId, data.message || 'Analyzing request...');
+            }
+          } else if (data.type === 'tool_start') {
+            removeThinking(thinkingId);
+            currentResponseDiv = ensureStreamAssistantRow(currentResponseDiv, currentAuthor);
+            addToolCallEvent(currentResponseDiv, data);
+          } else if (data.type === 'tool_end') {
+            finishToolCallEvent(currentResponseDiv, data);
           } else if (data.type === 'token') {
             removeThinking(thinkingId);
             if (!currentResponseDiv || currentAuthor !== (data.agent || data.agentId)) {
@@ -1271,6 +1288,85 @@ function updateThinking(id, text) {
 
 function removeThinking(id) {
   document.getElementById(id)?.remove();
+}
+
+function getToolActivityEl(row) {
+  let el = row.querySelector('.tool-activity');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'tool-activity';
+    const msgBody = row.querySelector('.msg-body');
+    const msgText = row.querySelector('.msg-text');
+    if (msgBody && msgText) {
+      msgBody.insertBefore(el, msgText);
+    } else if (msgBody) {
+      msgBody.appendChild(el);
+    }
+  }
+  return el;
+}
+
+function addToolCallEvent(row, data) {
+  if (!row) return null;
+  const activity = getToolActivityEl(row);
+  const callId = `tool-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const argsStr = data.args ? JSON.stringify(data.args) : '';
+
+  const item = document.createElement('div');
+  item.className = 'tool-call-item running';
+  item.dataset.toolCallId = callId;
+  item.dataset.toolName = data.tool || '';
+  item.innerHTML = `
+    <span class="tool-call-icon">🛠️</span>
+    <span class="tool-call-label">Tool Call:</span>
+    <span class="tool-call-name">${escapeHtml(data.tool || 'unknown')}</span>
+    <code class="tool-call-args">${escapeHtml(argsStr)}</code>
+    <span class="tool-call-status">running</span>
+  `;
+  activity.appendChild(item);
+  scrollToBottom();
+  return callId;
+}
+
+function finishToolCallEvent(row, data) {
+  if (!row) return;
+  const activity = row.querySelector('.tool-activity');
+  if (!activity) return;
+
+  const running = [...activity.querySelectorAll('.tool-call-item.running')];
+  const item = [...running].reverse().find((el) => el.dataset.toolName === data.tool) || running[running.length - 1];
+  if (!item) return;
+
+  item.classList.remove('running');
+  item.classList.add('done');
+  const status = item.querySelector('.tool-call-status');
+  if (status) status.textContent = 'done';
+
+  if (data.result) {
+    let preview = item.querySelector('.tool-call-result');
+    if (!preview) {
+      preview = document.createElement('div');
+      preview.className = 'tool-call-result';
+      item.appendChild(preview);
+    }
+    preview.textContent = data.result;
+  }
+  scrollToBottom();
+}
+
+function ensureStreamAssistantRow(currentResponseDiv, authorName) {
+  if (currentResponseDiv) return currentResponseDiv;
+
+  const row = createMessageRow('assistant', authorName);
+  const streamMsgId = row.dataset.msgId;
+  state.messagesById.set(streamMsgId, {
+    id: streamMsgId,
+    role: 'assistant',
+    author: authorName,
+    content: '',
+  });
+  els.messages.appendChild(row);
+  return row;
 }
 
 function renderPreviews() {
