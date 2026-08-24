@@ -1,4 +1,5 @@
 import { getAIProvider } from './ai/index.js';
+import { loadConfig } from './config.js';
 import { readFile, writeFile, listFiles } from './tools/fs.js';
 import { runCommand } from './tools/shell.js';
 import { tools as toolImplementations, toolDefinitions } from './tools/index.js';
@@ -21,6 +22,7 @@ export class Agent {
     this.personaId = config.personaId || 'default';
     this.persona = null; // Loaded in init()
     this.initialModel = config.model || null;
+    this.customSystemPrompt = config.customSystemPrompt || null;
     this.additionalContext = config.context || ''; // Extra instructions (e.g. for integrations)
     
     // ID is stable identifier (e.g. for storage)
@@ -37,21 +39,19 @@ export class Agent {
   }
 
   async init() {
-    this.provider = await getAIProvider(this.initialModel);
-    
-    // Load Persona
+    const config = await loadConfig();
+    const model = this.initialModel || config.model;
+    this.provider = await getAIProvider(model);
+    console.log(chalk.gray(`Agent ${this.id} using model: ${this.provider.model}`));
+
     this.persona = await loadPersona(this.personaId);
-    
-    // Set name if not provided in config
+
     if (!this.name) {
         this.name = this.persona.name;
     }
-    
-    // Filter tools based on persona
+
     const allowed = new Set(this.persona.allowedTools || []);
     this.toolsDefinition = toolDefinitions.filter(t => allowed.has(t.name));
-    
-    // Map implementations
     this.tools = {};
     for (const name of allowed) {
         if (toolImplementations[name]) {
@@ -59,7 +59,28 @@ export class Agent {
         }
     }
 
-    // Ensure Script Directory Exists (if context implies usage)
+    const systemPrompt = this._buildSystemPrompt();
+    this._setSystemMessage(systemPrompt);
+
+    try {
+        const history = await loadChatHistory(this.id);
+        if (history && history.length > 0) {
+            if (history[0].role === 'system') {
+                history[0].content = systemPrompt;
+            } else {
+                history.unshift({ role: 'system', content: systemPrompt });
+            }
+            this.memory = history;
+        }
+    } catch (e) {
+        console.error("Failed to load chat history:", e);
+        try {
+            await sendTelegramMessage(`Agent ${this.id} failed to load chat history: ${e.message || e}`);
+        } catch {}
+    }
+  }
+
+  _buildSystemPrompt() {
     const scriptDir = path.join(os.homedir(), '.agent', 'scripts');
     if (!fs.existsSync(scriptDir)) {
         try {
@@ -69,14 +90,13 @@ export class Agent {
         }
     }
 
-    // Use a unique sub-directory for this agent's planning files if id is provided
-    // This prevents context collision between different users (WhatsApp, Telegram, etc.)
     const agentDir = this.id !== 'default' ? `.agent/${this.id}` : '.agent';
     const taskPlanPath = `${agentDir}/task_plan.md`;
     const notesPath = `${agentDir}/notes.md`;
+    const personaPrompt = this.customSystemPrompt || this.persona?.systemPrompt || '';
 
     let systemPrompt = `You are ${this.name}.
-${this.persona.systemPrompt}
+${personaPrompt}
 
 CORE OPERATIONAL RULES:
 1. You are an autonomous agent. You are expected to ACT, not just chat.
@@ -106,38 +126,68 @@ For any complex task (multi-step, research, or development), you MUST use the "3
 NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
 `;
 
-    // Append Additional Context (e.g. Integration Rules)
     if (this.additionalContext) {
         systemPrompt += `\n\n${this.additionalContext}\n\nIMPORTANT: The script directory is available at: ${scriptDir}`;
     }
 
-    this.memory.push({
-      role: 'system',
-      content: systemPrompt
-    });
+    return systemPrompt;
+  }
 
-    // Load chat history
-    try {
-        const history = await loadChatHistory(this.id);
-        if (history && history.length > 0) {
-            // Update system prompt in history or prepend it
-            if (history[0].role === 'system') {
-                history[0].content = systemPrompt;
-            } else {
-                history.unshift({ role: 'system', content: systemPrompt });
-            }
-            this.memory = history;
-        }
-    } catch (e) {
-        console.error("Failed to load chat history:", e);
-        try {
-            await sendTelegramMessage(`Agent ${this.id} failed to load chat history: ${e.message || e}`);
-        } catch {}
+  _setSystemMessage(systemPrompt) {
+    if (this.memory.length > 0 && this.memory[0].role === 'system') {
+        this.memory[0].content = systemPrompt;
+    } else {
+        this.memory.unshift({ role: 'system', content: systemPrompt });
     }
   }
 
-  async chat(userMessage, confirmCallback = null, onUpdate = null) {
-    this.memory.push({ role: 'user', content: userMessage });
+  async applySettings({ name, model, customSystemPrompt, safeMode, personaUpdates }) {
+    if (name !== undefined) this.name = name;
+    if (safeMode !== undefined) this.safeMode = safeMode;
+    if (customSystemPrompt !== undefined) {
+        this.customSystemPrompt = customSystemPrompt || null;
+    }
+
+    if (personaUpdates) {
+        const { updatePersona } = await import('./personas/index.js');
+        await updatePersona(this.personaId, personaUpdates);
+    }
+
+    this.persona = await loadPersona(this.personaId);
+
+    const allowed = new Set(this.persona.allowedTools || []);
+    this.toolsDefinition = toolDefinitions.filter(t => allowed.has(t.name));
+    this.tools = {};
+    for (const toolName of allowed) {
+        if (toolImplementations[toolName]) {
+            this.tools[toolName] = toolImplementations[toolName];
+        }
+    }
+
+    if (model !== undefined) {
+        if (model) {
+            await this.updateModel(model);
+            this.initialModel = model;
+        } else {
+            this.initialModel = null;
+            const globalConfig = await loadConfig();
+            await this.updateModel(globalConfig.model);
+        }
+    }
+
+    const systemPrompt = this._buildSystemPrompt();
+    this._setSystemMessage(systemPrompt);
+
+    if (this.manager) {
+        await this.manager.saveState();
+    }
+  }
+
+  async chat(userMessage, confirmCallback = null, onUpdate = null, options = {}) {
+    const entry = { role: 'user', content: userMessage };
+    if (options.replyTo) entry.replyTo = options.replyTo;
+    if (options.messageId) entry.id = options.messageId;
+    this.memory.push(entry);
     
     // Check and summarize memory if needed
     await summarizeMemory(this);
@@ -250,33 +300,6 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
 
             // Add result to memory
             let memoryContent = typeof result === 'string' ? result : JSON.stringify(result);
-            
-            // CONTEXT OPTIMIZATION: Offload large tool outputs to file
-            const MAX_OUTPUT_LENGTH = 3000;
-            if (memoryContent.length > MAX_OUTPUT_LENGTH) {
-                try {
-                    const overflowDir = path.join(process.cwd(), '.agent', 'overflow');
-                    if (!fs.existsSync(overflowDir)) {
-                        fs.mkdirSync(overflowDir, { recursive: true });
-                    }
-                    
-                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                    const safeToolName = toolName.replace(/[^a-zA-Z0-9]/g, '_');
-                    const filename = `overflow_${timestamp}_${safeToolName}.txt`;
-                    const filePath = path.join(overflowDir, filename);
-                    
-                    fs.writeFileSync(filePath, memoryContent);
-                    
-                    const preview = memoryContent.substring(0, 500);
-                    memoryContent = `[SYSTEM: Tool output too large (${memoryContent.length} chars). Full content saved to: ${filePath}\nPreview: ${preview}...\n(Use 'read_file' to see full content if needed)]`;
-                    
-                    console.log(chalk.yellow(`⚠️  Tool output offloaded to ${filename} (${memoryContent.length} chars)`));
-                } catch (err) {
-                    console.error('Failed to offload large tool output:', err);
-                    // Fallback: truncate without saving if file write fails
-                    memoryContent = memoryContent.substring(0, MAX_OUTPUT_LENGTH) + '... [Truncated due to error]';
-                }
-            }
 
             this.memory.push({
                 role: 'tool',
@@ -383,7 +406,21 @@ NOTE: Ensure the directory \`${agentDir}\` exists before writing files.
         }
     }
     
-    let context = [...systemMessages, ...sanitizedRecent];
+    let context = [...systemMessages, ...sanitizedRecent].map((msg) => {
+        if (msg.role !== 'user' || !msg.replyTo) return msg;
+        const prefix = `[Replying to ${msg.replyTo.author || msg.replyTo.agentId || 'message'}]: "${String(msg.replyTo.content || '').slice(0, 200)}"\n\n`;
+        if (typeof msg.content === 'string') {
+            return { role: msg.role, content: prefix + msg.content };
+        }
+        if (Array.isArray(msg.content)) {
+            const copy = [...msg.content];
+            const textPart = copy.find((p) => p.type === 'text');
+            if (textPart) textPart.text = prefix + (textPart.text || '');
+            else copy.unshift({ type: 'text', text: prefix });
+            return { role: msg.role, content: copy };
+        }
+        return msg;
+    });
 
     if (truncateLargeOutputs) {
         // Create new objects to avoid mutating memory
@@ -510,12 +547,28 @@ User Question: ${question || 'Summarize this file and explain what it does.'}
   }
 
   async updateModel(modelId) {
-      if (this.provider && this.provider.model !== modelId) {
-          console.log(chalk.blue(`Switching agent ${this.id} model to ${modelId}`));
-          this.provider.model = modelId;
-          // Note: If switching between providers (OpenAI <-> Gemini) is needed, 
-          // we would need to recreate the provider here. 
-          // For now, assuming model string update is sufficient for same-provider or compatible.
+      const config = await loadConfig();
+      const resolved = modelId;
+
+      if (!resolved) return;
+
+      // Never switch to placeholder provider names or legacy web aliases
+      if (['openai', 'gemini', 'compatible'].includes(resolved)) {
+          console.log(chalk.yellow(`Ignoring invalid model alias "${resolved}", keeping ${this.provider?.model}`));
+          return;
+      }
+
+      if (config.provider === 'compatible' && !resolved.includes('/')) {
+          console.log(chalk.yellow(`Ignoring invalid compatible model "${resolved}", using ${config.model}`));
+          if (config.model && this.provider) {
+              this.provider.model = config.model;
+          }
+          return;
+      }
+
+      if (this.provider && this.provider.model !== resolved) {
+          console.log(chalk.blue(`Switching agent ${this.id} model to ${resolved}`));
+          this.provider.model = resolved;
       }
   }
 

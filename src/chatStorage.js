@@ -53,6 +53,13 @@ async function initDb() {
         );
     `);
 
+    // Migration: metadata column for reply info etc.
+    try {
+        await db.exec('ALTER TABLE chat ADD COLUMN metadata TEXT');
+    } catch {
+        // Column already exists
+    }
+
     // Migration Check
     try {
         const legacyTable = await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='chat_history'");
@@ -117,7 +124,7 @@ export async function loadChatHistory(agentId) {
         }
 
         const rows = await db.all(
-            "SELECT role, content, tool_calls, tool_call_id, name FROM chat WHERE session_id = ? ORDER BY id ASC",
+            "SELECT role, content, tool_calls, tool_call_id, name, metadata FROM chat WHERE session_id = ? ORDER BY id ASC",
             session.id
         );
 
@@ -131,6 +138,13 @@ export async function loadChatHistory(agentId) {
             }
             if (row.tool_call_id) msg.tool_call_id = row.tool_call_id;
             if (row.name) msg.name = row.name;
+            if (row.metadata) {
+                try {
+                    const meta = JSON.parse(row.metadata);
+                    if (meta.replyTo) msg.replyTo = meta.replyTo;
+                    if (meta.id) msg.id = meta.id;
+                } catch (e) {}
+            }
             return msg;
         });
 
@@ -180,17 +194,21 @@ export async function saveChatHistory(agentId, messages, agentInstance = null) {
     await db.run("DELETE FROM chat WHERE session_id = ?", session.id);
 
     const stmt = await db.prepare(
-        "INSERT INTO chat (session_id, role, content, tool_calls, tool_call_id, name) VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT INTO chat (session_id, role, content, tool_calls, tool_call_id, name, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)"
     );
 
     for (const msg of messages) {
+        const metadata = (msg.replyTo || msg.id)
+            ? JSON.stringify({ replyTo: msg.replyTo || null, id: msg.id || null })
+            : null;
         await stmt.run(
             session.id,
             msg.role,
             msg.content || '',
             msg.tool_calls ? JSON.stringify(msg.tool_calls) : null,
             msg.tool_call_id || null,
-            msg.name || null
+            msg.name || null,
+            metadata
         );
     }
     await stmt.finalize();

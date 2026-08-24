@@ -20,6 +20,38 @@ export async function saveConfig(config) {
   await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
+const SECRET_KEYS = ['openai_api_key', 'gemini_api_key', 'compatible_api_key', 'github_token'];
+
+export function maskSecret(value) {
+  if (!value || typeof value !== 'string') return '';
+  if (value.length <= 4) return '••••';
+  return `${'•'.repeat(8)}${value.slice(-4)}`;
+}
+
+export function sanitizeConfigForClient(config) {
+  const safe = { ...config };
+  for (const key of SECRET_KEYS) {
+    if (safe[key]) safe[key] = maskSecret(safe[key]);
+    safe[`${key}_set`] = Boolean(config[key]);
+  }
+  return safe;
+}
+
+export async function mergeConfigUpdate(incoming) {
+  const current = await loadConfig();
+  const merged = { ...current, ...incoming };
+
+  for (const key of SECRET_KEYS) {
+    const val = incoming[key];
+    if (val === undefined || val === '' || (typeof val === 'string' && val.includes('••••'))) {
+      merged[key] = current[key];
+    }
+  }
+
+  await saveConfig(merged);
+  return sanitizeConfigForClient(merged);
+}
+
 export async function getApiKey(provider) {
     // Priority: 1. Environment Variables, 2. Config File
     

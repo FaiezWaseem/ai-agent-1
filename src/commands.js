@@ -2,6 +2,8 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 import ora from 'ora';
 import { saveConfig, loadConfig } from './config.js';
+import { normalizeCompatibleBaseUrl } from './ai/index.js';
+import { syncSessionModels } from './agentManager.js';
 import { Agent } from './agent.js';
 import { writeFile, readFile } from './tools/fs.js';
 import { runCommand } from './tools/shell.js';
@@ -87,7 +89,7 @@ export async function setup() {
         {
           type: 'input',
           name: 'baseUrl',
-          message: 'Enter Base URL:',
+          message: 'Enter Base URL (must end with /v1):',
           default: 'http://localhost:8080/v1',
           when: (answers) => answers.provider === 'compatible',
         }
@@ -102,10 +104,13 @@ export async function setup() {
           config.gemini_api_key = providerAnswers.apiKey;
       } else if (providerAnswers.provider === 'compatible') {
           config.compatible_api_key = providerAnswers.apiKey;
-          config.compatible_base_url = providerAnswers.baseUrl;
+          config.compatible_base_url = normalizeCompatibleBaseUrl(providerAnswers.baseUrl);
       }
       
       await saveConfig(config);
+      if (config.model) {
+          await syncSessionModels(config.model);
+      }
       console.log(chalk.green('AI Provider configuration saved!\n'));
 
     } else if (action === '2') {

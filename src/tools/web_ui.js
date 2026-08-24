@@ -3,6 +3,20 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { AgentManager } from '../agentManager.js';
 import { savePersona, listPersonas } from '../personas/index.js';
+import { loadConfig, sanitizeConfigForClient, mergeConfigUpdate } from '../config.js';
+import { normalizeCompatibleBaseUrl } from '../ai/index.js';
+import { getPersonaById, updatePersona } from '../personas/index.js';
+import {
+    listChannels,
+    getChannel,
+    createChannel,
+    addAgentToChannel,
+    getChannelMessages,
+    appendChannelMessage,
+    buildChannelContextBlock,
+    resolveChannelTargets,
+    formatReplyPrefix,
+} from '../channelManager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,13 +32,70 @@ async function getManager() {
     if (!manager) {
         manager = new AgentManager();
         await manager.init();
-        
-        // Create default agent if none exists
+
+        // Ensure core team exists for channels
+        const coreTeam = [
+            { personaId: 'default', id: 'primary' },
+            { personaId: 'project_manager', id: 'pm' },
+            { personaId: 'team_lead', id: 'lead' },
+            { personaId: 'senior_engineer', id: 'senior' },
+            { personaId: 'testing_engineer', id: 'qa' },
+        ];
+
+        for (const role of coreTeam) {
+            if (!manager.getAgent(role.id)) {
+                try {
+                    await manager.createAgent(role.personaId, role.id);
+                } catch {
+                    // persona may be missing
+                }
+            }
+        }
+
         if (manager.agents.size === 0) {
             await manager.createAgent('default', 'primary');
         }
     }
     return manager;
+}
+
+async function resolveRequestedModel(requestedModel) {
+    const config = await loadConfig();
+    const fallback = config.model || null;
+
+    if (!requestedModel || typeof requestedModel !== 'string') {
+        return fallback;
+    }
+
+    // Ignore legacy web UI aliases like "openai", "deepseek", etc.
+    if (!requestedModel.includes('/') && config.provider === 'compatible') {
+        return fallback;
+    }
+
+    if (['openai', 'gemini', 'compatible', 'gpt-4o', 'gpt-3.5-turbo'].includes(requestedModel)) {
+        return fallback;
+    }
+
+    return requestedModel;
+}
+
+async function fetchCompatibleModels(config) {
+    const apiKey = config.compatible_api_key || process.env.COMPATIBLE_API_KEY;
+    const rawBaseURL = process.env.OPENAI_BASE_URL || config.compatible_base_url;
+    if (!apiKey || !rawBaseURL) return null;
+
+    const baseURL = normalizeCompatibleBaseUrl(rawBaseURL);
+    const response = await fetch(`${baseURL}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    return (data.data || []).map((m) => ({
+        id: m.id,
+        name: m.id,
+    }));
 }
 
 export const webUiToolDefinitions = [
@@ -49,9 +120,200 @@ export const webUiTools = {
     app.use(express.json({ limit: '50mb' }));
     app.use(express.static(PUBLIC_DIR));
 
-    // API Routes
-    
-    // Get all sessions (agents)
+    // --- Global AI config ---
+    app.get('/api/config', async (req, res) => {
+        try {
+            const config = await loadConfig();
+            res.json(sanitizeConfigForClient(config));
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.put('/api/config', async (req, res) => {
+        try {
+            const body = { ...req.body };
+            if (body.compatible_base_url) {
+                body.compatible_base_url = normalizeCompatibleBaseUrl(body.compatible_base_url);
+            }
+            const updated = await mergeConfigUpdate(body);
+            res.json(updated);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // --- Channels (multi-agent workspaces) ---
+
+    app.get('/api/channels', async (req, res) => {
+        try {
+            const mgr = await getManager();
+            const channels = await listChannels();
+            const enriched = channels.map((c) => ({
+                ...c,
+                agents: (c.agentIds || []).map((id) => {
+                    const a = mgr.getAgent(id);
+                    return a
+                        ? { id: a.id, name: a.name || a.id, persona: a.personaId }
+                        : { id, name: id, persona: null };
+                }),
+            }));
+            res.json(enriched);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.post('/api/channels', async (req, res) => {
+        try {
+            const mgr = await getManager();
+            const { name, description, agentIds = [] } = req.body;
+            if (!name) return res.status(400).json({ error: 'Channel name is required' });
+
+            const validIds = agentIds.filter((id) => mgr.getAgent(id));
+            const channel = await createChannel({ name, description, agentIds: validIds });
+            res.json(channel);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.get('/api/channels/:id', async (req, res) => {
+        try {
+            const mgr = await getManager();
+            const channel = await getChannel(req.params.id);
+            if (!channel) return res.status(404).json({ error: 'Channel not found' });
+
+            res.json({
+                ...channel,
+                agents: (channel.agentIds || []).map((id) => {
+                    const a = mgr.getAgent(id);
+                    return a ? { id: a.id, name: a.name, persona: a.personaId } : { id, name: id };
+                }),
+            });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.post('/api/channels/:id/agents', async (req, res) => {
+        try {
+            const mgr = await getManager();
+            const { agentId } = req.body;
+            if (!agentId || !mgr.getAgent(agentId)) {
+                return res.status(400).json({ error: 'Valid agentId required' });
+            }
+            const channel = await addAgentToChannel(req.params.id, agentId);
+            res.json(channel);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.get('/api/channels/:id/messages', async (req, res) => {
+        try {
+            const messages = await getChannelMessages(req.params.id);
+            res.json(messages);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.post('/api/channels/:id/chat/stream', async (req, res) => {
+        try {
+            const { message, model, images, replyTo } = req.body;
+            const channelId = req.params.id;
+
+            if (!message && (!images || images.length === 0)) {
+                return res.status(400).send('Missing message content');
+            }
+
+            const mgr = await getManager();
+            const channel = await getChannel(channelId);
+            if (!channel) return res.status(404).send('Channel not found');
+
+            await appendChannelMessage(channelId, {
+                role: 'user',
+                author: 'You',
+                content: message || '',
+                replyTo: replyTo || null,
+            });
+
+            const targets = resolveChannelTargets(message, channel, mgr);
+            if (targets.length === 0) {
+                return res.status(400).send('No agents in this channel. Add agents first.');
+            }
+
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+
+            const confirmCallback = async (msg) => {
+                console.log(`[WebUI Auto-Confirm] ${msg}`);
+                return true;
+            };
+
+            const channelContext = buildChannelContextBlock(channel, mgr);
+            const replyPrefix = formatReplyPrefix(replyTo);
+            const messageBody = `${replyPrefix}${message || ''}`;
+
+            for (const agentId of targets) {
+                const agent = mgr.getAgent(agentId);
+                if (!agent) continue;
+
+                if (model) {
+                    const resolvedModel = await resolveRequestedModel(model);
+                    if (resolvedModel && agent.provider?.model !== resolvedModel) {
+                        await agent.updateModel(resolvedModel);
+                    }
+                }
+
+                res.write(`data: ${JSON.stringify({ type: 'agent_start', agent: agent.name || agent.id, agentId: agent.id })}\n\n`);
+
+                let userMessage = `${channelContext}\n\n---\n\nUSER MESSAGE IN CHANNEL:\n${messageBody}`;
+                if (images?.length > 0) {
+                    userMessage = [
+                        { type: 'text', text: userMessage },
+                        ...images.map((img) => ({ type: 'image_url', image_url: { url: img } })),
+                    ];
+                }
+
+                let fullResponse = '';
+
+                const onUpdate = (data) => {
+                    if (data.type === 'token') {
+                        fullResponse += data.content || '';
+                        res.write(`data: ${JSON.stringify({ ...data, agent: agent.name || agent.id, agentId: agent.id })}\n\n`);
+                    } else {
+                        res.write(`data: ${JSON.stringify({ ...data, agent: agent.name || agent.id, agentId: agent.id })}\n\n`);
+                    }
+                };
+
+                try {
+                    await agent.chat(userMessage, confirmCallback, onUpdate);
+                    await appendChannelMessage(channelId, {
+                        role: 'assistant',
+                        author: agent.name || agent.id,
+                        agentId: agent.id,
+                        content: fullResponse || '(completed)',
+                    });
+                } catch (err) {
+                    res.write(`data: ${JSON.stringify({ type: 'error', error: err.message, agentId: agent.id })}\n\n`);
+                }
+
+                res.write(`data: ${JSON.stringify({ type: 'agent_done', agentId: agent.id })}\n\n`);
+            }
+
+            res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+            res.end();
+        } catch (e) {
+            console.error('Channel chat stream error:', e);
+            res.write(`data: ${JSON.stringify({ type: 'error', error: e.message })}\n\n`);
+            res.end();
+        }
+    });
+
+    // --- Individual agent sessions (DMs) ---
     app.get('/api/sessions', async (req, res) => {
         try {
             const mgr = await getManager();
@@ -59,7 +321,9 @@ export const webUiTools = {
                 id: a.id,
                 name: a.name || a.id,
                 persona: a.personaId,
-                model: a.provider ? a.provider.model : null
+                model: a.initialModel || null,
+                safeMode: a.safeMode,
+                customSystemPrompt: a.customSystemPrompt || null,
             }));
             res.json(sessions);
         } catch (e) {
@@ -67,23 +331,67 @@ export const webUiTools = {
         }
     });
 
-    // Get available models
-    app.get('/api/models', (req, res) => {
-        const models = [
-            { id: 'openai', name: 'GPT-5 Mini' },
-            { id: 'openai-fast', name: 'GPT-5 Nano' },
-            { id: 'openai-large', name: 'GPT-5.2' },
-            { id: 'grok', name: 'xAI Grok 4 Fast' },
-            { id: 'qwen-coder', name: 'Qwen3 Coder 30B' },
-            { id: 'mistral', name: 'Mistral Small 3.2 24B' },
-            { id: 'deepseek', name: 'DeepSeek V3.2' },
-            { id: 'glm', name: 'Z.ai GLM-4.7' },
-            { id: 'claude-fast', name: 'Claude Haiku 4.5' },
-            { id: 'claude', name: 'Claude Sonnet 4.5' },
-            { id: 'claude-large', name: 'Claude Opus 4.5' },
-            { id: 'nomnom', name: 'NomNom by @Itachi-1824' },
-        ];
-        res.json(models);
+    app.get('/api/sessions/:id', async (req, res) => {
+        try {
+            const mgr = await getManager();
+            const details = mgr.getAgentDetails(req.params.id);
+            if (!details) return res.status(404).json({ error: 'Agent not found' });
+            res.json(details);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.put('/api/sessions/:id', async (req, res) => {
+        try {
+            const mgr = await getManager();
+            const updated = await mgr.updateAgent(req.params.id, req.body);
+            res.json(updated);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // Get available models from config / provider
+    app.get('/api/models', async (req, res) => {
+        try {
+            const config = await loadConfig();
+            let models = [];
+
+            if (config.provider === 'compatible') {
+                const remoteModels = await fetchCompatibleModels(config);
+                if (remoteModels?.length) {
+                    models = remoteModels;
+                }
+            }
+
+            if (models.length === 0 && config.model) {
+                models = [{ id: config.model, name: config.model }];
+            }
+
+            if (models.length === 0) {
+                models = [{ id: 'default', name: 'Default Model' }];
+            }
+
+            // Put configured model first so the UI defaults to it
+            if (config.model) {
+                models.sort((a, b) => {
+                    if (a.id === config.model) return -1;
+                    if (b.id === config.model) return 1;
+                    return a.id.localeCompare(b.id);
+                });
+            }
+
+            res.json({
+                defaultModel: config.model || models[0].id,
+                models,
+            });
+        } catch (e) {
+            res.status(500).json({
+                defaultModel: 'default',
+                models: [{ id: 'default', name: 'Default Model' }],
+            });
+        }
     });
 
     // Get available personas
@@ -91,6 +399,24 @@ export const webUiTools = {
         try {
             const personas = await listPersonas();
             res.json(personas);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.get('/api/personas/:id', async (req, res) => {
+        try {
+            const persona = await getPersonaById(req.params.id);
+            res.json(persona);
+        } catch (e) {
+            res.status(404).json({ error: e.message });
+        }
+    });
+
+    app.put('/api/personas/:id', async (req, res) => {
+        try {
+            const persona = await updatePersona(req.params.id, req.body);
+            res.json(persona);
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
@@ -151,7 +477,7 @@ export const webUiTools = {
     // Stream message
     app.post('/api/chat/stream', async (req, res) => {
         try {
-            const { sessionId, message, model, images } = req.body;
+            const { sessionId, message, model, images, replyTo } = req.body;
 
             console.log(`[WebUI] Stream Request: session=${sessionId}, message length=${message ? message.length : 0}, images count=${images ? images.length : 0}`);
             if (images && images.length > 0) {
@@ -168,9 +494,12 @@ export const webUiTools = {
                 return res.status(404).send('Session not found');
             }
 
-            // Update model if requested
+            // Only override model when the client explicitly sends one
             if (model) {
-                await agent.updateModel(model);
+                const resolvedModel = await resolveRequestedModel(model);
+                if (resolvedModel && agent.provider?.model !== resolvedModel) {
+                    await agent.updateModel(resolvedModel);
+                }
             }
 
             // Construct user message (text or multimodal)
@@ -200,7 +529,10 @@ export const webUiTools = {
                 res.write(`data: ${JSON.stringify(data)}\n\n`);
             };
 
-            await agent.chat(userMessage, confirmCallback, onUpdate);
+            await agent.chat(userMessage, confirmCallback, onUpdate, {
+                replyTo: replyTo || null,
+                messageId: req.body.messageId || null,
+            });
             
             res.end();
         } catch (e) {

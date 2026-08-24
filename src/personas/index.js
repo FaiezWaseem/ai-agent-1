@@ -47,6 +47,37 @@ export async function listPersonas() {
     }
 }
 
+export async function getPersonaById(personaId) {
+    const data = await loadPersona(personaId);
+    return { id: personaId, ...data };
+}
+
+export async function updatePersona(personaId, updates) {
+    const existing = await loadPersona(personaId);
+    const merged = {
+        ...existing,
+        ...updates,
+    };
+
+    if (!merged.name || !merged.systemPrompt) {
+        throw new Error('Persona requires name and systemPrompt');
+    }
+
+    const filePath = path.join(__dirname, `${personaId}.json`);
+    const data = {
+        name: merged.name,
+        description: merged.description || '',
+        systemPrompt: merged.systemPrompt,
+        allowedTools: merged.allowedTools || [],
+        temperature: merged.temperature,
+    };
+
+    Object.keys(data).forEach((k) => data[k] === undefined && delete data[k]);
+
+    await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+    return { id: personaId, ...data };
+}
+
 export async function savePersona(persona) {
     const { id, name, systemPrompt, allowedTools, description } = persona;
     
