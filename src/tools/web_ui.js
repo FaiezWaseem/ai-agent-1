@@ -17,6 +17,7 @@ import {
     resolveChannelTargets,
     formatReplyPrefix,
 } from '../channelManager.js';
+import { registerAgentManagerGetter } from './scheduler.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,6 +33,7 @@ async function getManager() {
     if (!manager) {
         manager = new AgentManager();
         await manager.init();
+        registerAgentManagerGetter(() => manager);
 
         // Ensure core team exists for channels
         const coreTeam = [

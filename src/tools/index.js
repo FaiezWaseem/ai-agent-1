@@ -395,49 +395,6 @@ export const tools = {
     }
     return stdout || stderr || "Command executed with no output.";
   },
-  schedule_task: async ({ cron_expression, command, id }, { agent, confirmCallback }) => {
-    const expr = cron_expression;
-    if (!cron.validate(expr)) {
-        return `Invalid cron expression: ${expr}`;
-    }
-    const baseId = id && typeof id === 'string' ? id : null;
-    const taskId = baseId && !scheduledTasks.has(baseId)
-        ? baseId
-        : `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    if (scheduledTasks.has(taskId)) {
-        return `Task with id ${taskId} already exists.`;
-    }
-    const cwd = agent?.cwd || process.cwd();
-    if (agent?.safeMode) {
-        if (!confirmCallback) return "Error: Safe Mode enabled but no confirmation callback provided.";
-        const approved = await confirmCallback(`[SAFE MODE] Schedule command?\n${command}\nCron: ${expr}`);
-        if (!approved) return "Task scheduling cancelled by user.";
-    }
-    const job = createTaskJob(taskId, expr, command, cwd);
-    scheduledTasks.set(taskId, { job, command, cron_expression: expr, cwd });
-    await persistScheduledTasks();
-    return `Scheduled task ${taskId} with cron "${expr}" for command "${command}".`;
-  },
-  list_scheduled_tasks: async () => {
-    if (scheduledTasks.size === 0) {
-        return "No scheduled tasks.";
-    }
-    const lines = [];
-    for (const [id, task] of scheduledTasks.entries()) {
-        lines.push(`${id} | cron: ${task.cron_expression} | command: ${task.command} | cwd: ${task.cwd}`);
-    }
-    return lines.join('\n');
-  },
-  cancel_scheduled_task: async ({ id }) => {
-    const task = scheduledTasks.get(id);
-    if (!task) {
-        return `Task ${id} not found.`;
-    }
-    task.job.stop();
-    scheduledTasks.delete(id);
-    await persistScheduledTasks();
-    return `Cancelled scheduled task ${id}.`;
-  },
   list_files: async ({ path: dirPath = '.', ignore = ['node_modules/**', '.git/**'] }, { agent }) => {
     const fullPath = resolvePath(dirPath, agent?.cwd);
     const files = await listFiles(`${fullPath}/**/*`, ignore);

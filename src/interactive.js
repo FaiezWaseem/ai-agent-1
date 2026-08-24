@@ -5,6 +5,7 @@ import { clearChatHistory } from './chatStorage.js';
 import { AgentManager } from './agentManager.js';
 import { loadConfig } from './config.js';
 import { generateAudio } from './tools/audio.js';
+import { registerAgentManagerGetter } from './tools/scheduler.js';
 import ora from 'ora';
 
 export async function startInteractiveMode() {
@@ -16,6 +17,7 @@ export async function startInteractiveMode() {
 
   const manager = new AgentManager();
   await manager.init();
+  registerAgentManagerGetter(() => manager);
   
   // Initialize default agents only if no agents loaded
   if (manager.agents.size === 0) {
