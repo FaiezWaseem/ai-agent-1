@@ -153,13 +153,15 @@
             <option value="openai">OpenAI</option>
             <option value="gemini">Gemini</option>
             <option value="compatible">OpenAI Compatible</option>
+            <option value="grok-cli">Grok CLI (local)</option>
           </select>
         </div>
+        <div id="grok-cli-status" class="grok-cli-status hidden"></div>
         <div class="form-group">
           <label>Default Model</label>
-          <input id="cfg-model" type="text" placeholder="e.g. deepseek-ai/deepseek-v4-flash-0731">
+          <input id="cfg-model" type="text" placeholder="e.g. grok-build">
         </div>
-        <div class="form-group">
+        <div class="form-group" id="cfg-group-compatible-url">
           <label>Compatible Base URL</label>
           <input id="cfg-base-url" type="text" placeholder="https://integrate.api.nvidia.com/v1">
         </div>
@@ -175,6 +177,10 @@
           <label>Compatible API Key</label>
           <input id="cfg-compatible-key" type="password" placeholder="Leave blank to keep existing">
         </div>
+        <p class="form-hint" id="cfg-grok-cli-hint" hidden>
+          Uses your local Grok CLI session from <code>~/.grok/auth.json</code>.
+          Run <code>grok login</code> once — no separate proxy server needed.
+        </p>
         <p class="form-hint">Global settings apply to all agents unless an agent has its own model override.</p>
       </div>
 

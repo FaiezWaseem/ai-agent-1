@@ -553,7 +553,7 @@ User Question: ${question || 'Summarize this file and explain what it does.'}
       if (!resolved) return;
 
       // Never switch to placeholder provider names or legacy web aliases
-      if (['openai', 'gemini', 'compatible'].includes(resolved)) {
+      if (['openai', 'gemini', 'compatible', 'grok-cli'].includes(resolved)) {
           console.log(chalk.yellow(`Ignoring invalid model alias "${resolved}", keeping ${this.provider?.model}`));
           return;
       }

@@ -3,6 +3,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 import { saveConfig, loadConfig } from './config.js';
 import { normalizeCompatibleBaseUrl } from './ai/index.js';
+import { getGrokCliProviderStatus, DEFAULT_GROK_CLI_MODEL } from './ai/grok-cli.js';
 import { syncSessionModels } from './agentManager.js';
 import { Agent } from './agent.js';
 import { writeFile, readFile } from './tools/fs.js';
@@ -67,7 +68,7 @@ export async function setup() {
           type: 'list',
           name: 'provider',
           message: 'Select AI Provider:',
-          choices: ['openai', 'gemini', 'compatible'],
+          choices: ['openai', 'gemini', 'compatible', 'grok-cli'],
           default: config.provider,
         },
         {
@@ -77,6 +78,7 @@ export async function setup() {
           default: (answers) => {
             if (answers.provider === 'openai') return 'gpt-4o';
             if (answers.provider === 'gemini') return 'gemini-1.5-flash';
+            if (answers.provider === 'grok-cli') return DEFAULT_GROK_CLI_MODEL;
             return 'gpt-3.5-turbo';
           },
         },
@@ -85,6 +87,7 @@ export async function setup() {
           name: 'apiKey',
           message: 'Enter API Key:',
           mask: '*',
+          when: (answers) => answers.provider !== 'grok-cli',
         },
         {
           type: 'input',
@@ -92,8 +95,27 @@ export async function setup() {
           message: 'Enter Base URL (must end with /v1):',
           default: 'http://localhost:8080/v1',
           when: (answers) => answers.provider === 'compatible',
-        }
+        },
       ]);
+
+      if (providerAnswers.provider === 'grok-cli') {
+          const statusSpinner = ora('Checking Grok CLI session (~/.grok/auth.json)...').start();
+          const draftConfig = {
+              ...config,
+              provider: 'grok-cli',
+              model: providerAnswers.model,
+          };
+          const status = await getGrokCliProviderStatus(draftConfig);
+          if (status.available) {
+              statusSpinner.succeed(
+                  `Grok CLI ready${status.cliAuth.email ? ` (${status.cliAuth.email})` : ''}`
+              );
+          } else if (status.cliAuth.connected) {
+              statusSpinner.warn(status.reason || 'Grok CLI session found but not usable');
+          } else {
+              statusSpinner.warn('No Grok CLI session — run `grok login` first');
+          }
+      }
 
       config.provider = providerAnswers.provider;
       config.model = providerAnswers.model;

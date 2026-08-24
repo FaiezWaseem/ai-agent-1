@@ -1376,6 +1376,28 @@ body {
   font-weight: normal;
 }
 
+.grok-cli-status {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  background: rgba(255, 193, 7, 0.12);
+  color: var(--text-muted);
+  border: 1px solid rgba(255, 193, 7, 0.25);
+}
+
+.grok-cli-status.ok {
+  background: rgba(76, 175, 80, 0.12);
+  border-color: rgba(76, 175, 80, 0.25);
+  color: var(--text-primary);
+}
+
+.grok-cli-status.warn {
+  background: rgba(255, 193, 7, 0.12);
+  border-color: rgba(255, 193, 7, 0.25);
+}
+
 .list-item .edit-btn {
   margin-left: auto;
   opacity: 0;

@@ -101,6 +101,9 @@ function cacheElements() {
   els.cfgProvider = document.getElementById('cfg-provider');
   els.cfgModel = document.getElementById('cfg-model');
   els.cfgBaseUrl = document.getElementById('cfg-base-url');
+  els.cfgGrokCliStatus = document.getElementById('grok-cli-status');
+  els.cfgGrokCliHint = document.getElementById('cfg-grok-cli-hint');
+  els.cfgGroupCompatibleUrl = document.getElementById('cfg-group-compatible-url');
   els.cfgOpenaiKey = document.getElementById('cfg-openai-key');
   els.cfgGeminiKey = document.getElementById('cfg-gemini-key');
   els.cfgCompatibleKey = document.getElementById('cfg-compatible-key');
@@ -162,6 +165,7 @@ function bindEvents() {
   els.cancelSettingsBtn?.addEventListener('click', closeSettingsModal);
   els.closeSettingsX?.addEventListener('click', closeSettingsModal);
   els.cfgAgentSelect?.addEventListener('change', () => loadAgentSettingsForm(els.cfgAgentSelect.value));
+  els.cfgProvider?.addEventListener('change', () => updateProviderSettingsVisibility());
 
   document.querySelectorAll('.settings-tab').forEach((tab) => {
     tab.addEventListener('click', () => switchSettingsTab(tab.dataset.tab));
@@ -1346,6 +1350,63 @@ function closeSettingsModal() {
   els.settingsModal.classList.remove('show');
 }
 
+function updateProviderSettingsVisibility() {
+  const provider = els.cfgProvider?.value || 'openai';
+  const isGrokCli = provider === 'grok-cli';
+  const isCompatible = provider === 'compatible';
+
+  els.cfgGroupCompatibleUrl?.classList.toggle('hidden', !isCompatible);
+  els.cfgGrokCliHint?.toggleAttribute('hidden', !isGrokCli);
+  els.cfgGrokCliStatus?.classList.toggle('hidden', !isGrokCli);
+
+  if (isGrokCli) {
+    refreshGrokCliStatus();
+  }
+}
+
+function renderGrokCliStatus(status) {
+  if (!els.cfgGrokCliStatus) return;
+
+  if (!status) {
+    els.cfgGrokCliStatus.textContent = 'Checking Grok CLI session…';
+    els.cfgGrokCliStatus.className = 'grok-cli-status';
+    return;
+  }
+
+  const parts = [];
+  if (status.cliAuth?.connected) {
+    const email = status.cliAuth.email ? ` (${status.cliAuth.email})` : '';
+    const expired = status.cliAuth.expired ? ' — session expired, run grok login' : '';
+    parts.push(`CLI session: found${email}${expired}`);
+  } else {
+    parts.push('CLI session: not found — run grok login');
+  }
+
+  if (status.available) {
+    parts.push('ready to use');
+  } else if (status.reason) {
+    parts.push(status.reason);
+  }
+
+  els.cfgGrokCliStatus.textContent = parts.join(' · ');
+  els.cfgGrokCliStatus.className = `grok-cli-status ${status.available ? 'ok' : 'warn'}`;
+}
+
+async function refreshGrokCliStatus() {
+  renderGrokCliStatus(null);
+  try {
+    const res = await fetch('/api/providers/grok-cli/status');
+    if (!res.ok) throw new Error('Status check failed');
+    renderGrokCliStatus(await res.json());
+  } catch (e) {
+    renderGrokCliStatus({
+      available: false,
+      cliAuth: { connected: false },
+      reason: e.message,
+    });
+  }
+}
+
 async function loadGlobalSettingsForm() {
   try {
     const res = await fetch('/api/config');
@@ -1359,6 +1420,7 @@ async function loadGlobalSettingsForm() {
     els.cfgGeminiKey.placeholder = cfg.gemini_api_key_set ? `Saved (${cfg.gemini_api_key})` : 'Not set';
     els.cfgCompatibleKey.value = '';
     els.cfgCompatibleKey.placeholder = cfg.compatible_api_key_set ? `Saved (${cfg.compatible_api_key})` : 'Not set';
+    updateProviderSettingsVisibility();
   } catch (e) {
     console.error('Failed to load config', e);
   }

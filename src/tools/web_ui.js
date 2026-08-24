@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import { AgentManager } from '../agentManager.js';
 import { savePersona, listPersonas } from '../personas/index.js';
 import { loadConfig, sanitizeConfigForClient, mergeConfigUpdate } from '../config.js';
-import { normalizeCompatibleBaseUrl } from '../ai/index.js';
+import { normalizeCompatibleBaseUrl, fetchGrokCliModels, getGrokCliProviderStatus } from '../ai/index.js';
 import { getPersonaById, updatePersona } from '../personas/index.js';
 import {
     listChannels,
@@ -70,12 +70,11 @@ async function resolveRequestedModel(requestedModel) {
         return fallback;
     }
 
-    // Ignore legacy web UI aliases like "openai", "deepseek", etc.
-    if (!requestedModel.includes('/') && config.provider === 'compatible') {
+    if (['openai', 'gemini', 'compatible', 'grok-cli', 'gpt-4o', 'gpt-3.5-turbo'].includes(requestedModel)) {
         return fallback;
     }
 
-    if (['openai', 'gemini', 'compatible', 'gpt-4o', 'gpt-3.5-turbo'].includes(requestedModel)) {
+    if (!requestedModel.includes('/') && config.provider === 'compatible') {
         return fallback;
     }
 
@@ -141,6 +140,16 @@ export const webUiTools = {
             }
             const updated = await mergeConfigUpdate(body);
             res.json(updated);
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    app.get('/api/providers/grok-cli/status', async (req, res) => {
+        try {
+            const config = await loadConfig();
+            const status = await getGrokCliProviderStatus(config);
+            res.json(status);
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
@@ -374,6 +383,11 @@ export const webUiTools = {
 
             if (config.provider === 'compatible') {
                 const remoteModels = await fetchCompatibleModels(config);
+                if (remoteModels?.length) {
+                    models = remoteModels;
+                }
+            } else if (config.provider === 'grok-cli') {
+                const remoteModels = await fetchGrokCliModels(config);
                 if (remoteModels?.length) {
                     models = remoteModels;
                 }
